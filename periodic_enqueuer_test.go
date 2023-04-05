@@ -1,18 +1,18 @@
 package work
 
 import (
+	"context"
 	"testing"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
 	"github.com/robfig/cron/v3"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestPeriodicEnqueuer(t *testing.T) {
-	pool := newTestPool(":6379")
+	rcl := newTestClient(RedisTestPort)
 	ns := "work"
-	cleanKeyspace(ns, pool)
+	cleanKeyspace(ns, rcl)
 
 	var pjs []*periodicJob
 	pjs = appendPeriodicJob(pjs, "0/29 * * * * *", "foo") // Every 29 seconds
@@ -22,11 +22,11 @@ func TestPeriodicEnqueuer(t *testing.T) {
 	setNowEpochSecondsMock(1468359453)
 	defer resetNowEpochSecondsMock()
 
-	pe := newPeriodicEnqueuer(ns, pool, pjs)
+	pe := newPeriodicEnqueuer(ns, rcl, pjs)
 	err := pe.enqueue()
 	assert.NoError(t, err)
 
-	c := NewClient(ns, pool)
+	c := NewClient(ns, rcl)
 	scheduledJobs, count, err := c.ScheduledJobs(1)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 20, count)
@@ -67,11 +67,8 @@ func TestPeriodicEnqueuer(t *testing.T) {
 		assert.Equal(t, e.scheduledFor, scheduledJobs[i].RunAt)
 	}
 
-	conn := pool.Get()
-	defer conn.Close()
-
 	// Make sure the last periodic enqueued was set
-	lastEnqueue, err := redis.Int64(conn.Do("GET", redisKeyLastPeriodicEnqueue(ns)))
+	lastEnqueue, err := rcl.Get(context.TODO(), redisKeyLastPeriodicEnqueue(ns)).Int64()
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1468359453, lastEnqueue)
 
@@ -86,7 +83,7 @@ func TestPeriodicEnqueuer(t *testing.T) {
 	assert.EqualValues(t, 20, count)
 
 	// Make sure the last periodic enqueued was set
-	lastEnqueue, err = redis.Int64(conn.Do("GET", redisKeyLastPeriodicEnqueue(ns)))
+	lastEnqueue, err = rcl.Get(context.TODO(), redisKeyLastPeriodicEnqueue(ns)).Int64()
 	assert.NoError(t, err)
 	assert.EqualValues(t, 1468359454, lastEnqueue)
 
@@ -98,11 +95,11 @@ func TestPeriodicEnqueuer(t *testing.T) {
 }
 
 func TestPeriodicEnqueuerSpawn(t *testing.T) {
-	pool := newTestPool(":6379")
+	rcl := newTestClient(RedisTestPort)
 	ns := "work"
-	cleanKeyspace(ns, pool)
+	cleanKeyspace(ns, rcl)
 
-	pe := newPeriodicEnqueuer(ns, pool, nil)
+	pe := newPeriodicEnqueuer(ns, rcl, nil)
 	pe.start()
 	pe.stop()
 }

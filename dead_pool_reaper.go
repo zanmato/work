@@ -1,12 +1,13 @@
 package work
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"strings"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -18,7 +19,7 @@ const (
 
 type deadPoolReaper struct {
 	namespace   string
-	pool        *redis.Pool
+	redisClient *redis.Client
 	deadTime    time.Duration
 	reapPeriod  time.Duration
 	curJobTypes []string
@@ -27,10 +28,10 @@ type deadPoolReaper struct {
 	doneStoppingChan chan struct{}
 }
 
-func newDeadPoolReaper(namespace string, pool *redis.Pool, curJobTypes []string) *deadPoolReaper {
+func newDeadPoolReaper(namespace string, redisClient *redis.Client, curJobTypes []string) *deadPoolReaper {
 	return &deadPoolReaper{
 		namespace:        namespace,
-		pool:             pool,
+		redisClient:      redisClient,
 		deadTime:         deadTime,
 		reapPeriod:       reapPeriod,
 		curJobTypes:      curJobTypes,
@@ -77,9 +78,6 @@ func (r *deadPoolReaper) reap() error {
 		return err
 	}
 
-	conn := r.pool.Get()
-	defer conn.Close()
-
 	workerPoolsKey := redisKeyWorkerPools(r.namespace)
 
 	// Cleanup all dead pools
@@ -88,7 +86,7 @@ func (r *deadPoolReaper) reap() error {
 		// if we found jobs from the heartbeat, requeue them and remove the heartbeat
 		if len(jobTypes) > 0 {
 			r.requeueInProgressJobs(deadPoolID, jobTypes)
-			if _, err = conn.Do("DEL", redisKeyHeartbeat(r.namespace, deadPoolID)); err != nil {
+			if err := r.redisClient.Del(context.TODO(), redisKeyHeartbeat(r.namespace, deadPoolID)).Err(); err != nil {
 				return err
 			}
 		} else {
@@ -96,11 +94,11 @@ func (r *deadPoolReaper) reap() error {
 			lockJobTypes = r.curJobTypes
 		}
 		// Remove dead pool from worker pools set
-		if _, err = conn.Do("SREM", workerPoolsKey, deadPoolID); err != nil {
+		if err := r.redisClient.SRem(context.TODO(), workerPoolsKey, deadPoolID).Err(); err != nil {
 			return err
 		}
 		// Cleanup any stale lock info
-		if err = r.cleanStaleLockInfo(deadPoolID, lockJobTypes); err != nil {
+		if err := r.cleanStaleLockInfo(deadPoolID, lockJobTypes); err != nil {
 			return err
 		}
 	}
@@ -109,42 +107,37 @@ func (r *deadPoolReaper) reap() error {
 }
 
 func (r *deadPoolReaper) cleanStaleLockInfo(poolID string, jobTypes []string) error {
-	numKeys := len(jobTypes) * 2
-	redisReapLocksScript := redis.NewScript(numKeys, redisLuaReapStaleLocks)
-	var scriptArgs = make([]interface{}, 0, numKeys+1) // +1 for argv[1]
+	redisReapLocksScript := redis.NewScript(redisLuaReapStaleLocks)
 
+	keys := make([]string, 0, len(jobTypes)*2)
 	for _, jobType := range jobTypes {
-		scriptArgs = append(scriptArgs, redisKeyJobsLock(r.namespace, jobType), redisKeyJobsLockInfo(r.namespace, jobType))
+		keys = append(keys, redisKeyJobsLock(r.namespace, jobType), redisKeyJobsLockInfo(r.namespace, jobType))
 	}
-	scriptArgs = append(scriptArgs, poolID) // ARGV[1]
 
-	conn := r.pool.Get()
-	defer conn.Close()
-	if _, err := redisReapLocksScript.Do(conn, scriptArgs...); err != nil {
-		return err
+	if err := redisReapLocksScript.Run(context.TODO(), r.redisClient, keys, poolID).Err(); err != nil {
+		if err == redis.Nil {
+			return nil
+		}
+
+		return fmt.Errorf("clean stale lock info: %w", err)
 	}
 
 	return nil
 }
 
 func (r *deadPoolReaper) requeueInProgressJobs(poolID string, jobTypes []string) error {
-	numKeys := len(jobTypes) * requeueKeysPerJob
-	redisRequeueScript := redis.NewScript(numKeys, redisLuaReenqueueJob)
-	var scriptArgs = make([]interface{}, 0, numKeys+1)
+	redisRequeueScript := redis.NewScript(redisLuaReenqueueJob)
 
+	keys := make([]string, 0, len(jobTypes)*requeueKeysPerJob)
 	for _, jobType := range jobTypes {
 		// pops from in progress, push into job queue and decrement the queue lock
-		scriptArgs = append(scriptArgs, redisKeyJobsInProgress(r.namespace, poolID, jobType), redisKeyJobs(r.namespace, jobType), redisKeyJobsLock(r.namespace, jobType), redisKeyJobsLockInfo(r.namespace, jobType)) // KEYS[1-4 * N]
+		keys = append(keys, redisKeyJobsInProgress(r.namespace, poolID, jobType), redisKeyJobs(r.namespace, jobType), redisKeyJobsLock(r.namespace, jobType), redisKeyJobsLockInfo(r.namespace, jobType)) // KEYS[1-4 * N]
 	}
-	scriptArgs = append(scriptArgs, poolID) // ARGV[1]
-
-	conn := r.pool.Get()
-	defer conn.Close()
 
 	// Keep moving jobs until all queues are empty
 	for {
-		values, err := redis.Values(redisRequeueScript.Do(conn, scriptArgs...))
-		if err == redis.ErrNil {
+		values, err := redisRequeueScript.Run(context.TODO(), r.redisClient, keys, poolID).Slice()
+		if err == redis.Nil {
 			return nil
 		} else if err != nil {
 			return err
@@ -157,12 +150,9 @@ func (r *deadPoolReaper) requeueInProgressJobs(poolID string, jobTypes []string)
 }
 
 func (r *deadPoolReaper) findDeadPools() (map[string][]string, error) {
-	conn := r.pool.Get()
-	defer conn.Close()
-
 	workerPoolsKey := redisKeyWorkerPools(r.namespace)
 
-	workerPoolIDs, err := redis.Strings(conn.Do("SMEMBERS", workerPoolsKey))
+	workerPoolIDs, err := r.redisClient.SMembers(context.TODO(), workerPoolsKey).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -170,8 +160,9 @@ func (r *deadPoolReaper) findDeadPools() (map[string][]string, error) {
 	deadPools := map[string][]string{}
 	for _, workerPoolID := range workerPoolIDs {
 		heartbeatKey := redisKeyHeartbeat(r.namespace, workerPoolID)
-		heartbeatAt, err := redis.Int64(conn.Do("HGET", heartbeatKey, "heartbeat_at"))
-		if err == redis.ErrNil {
+
+		heartbeatAt, err := r.redisClient.HGet(context.TODO(), heartbeatKey, "heartbeat_at").Int64()
+		if err == redis.Nil {
 			// heartbeat expired, save dead pool and use cur set of jobs from reaper
 			deadPools[workerPoolID] = []string{}
 			continue
@@ -185,8 +176,8 @@ func (r *deadPoolReaper) findDeadPools() (map[string][]string, error) {
 			continue
 		}
 
-		jobTypesList, err := redis.String(conn.Do("HGET", heartbeatKey, "job_names"))
-		if err == redis.ErrNil {
+		jobTypesList, err := r.redisClient.HGet(context.TODO(), heartbeatKey, "job_names").Result()
+		if err == redis.Nil {
 			continue
 		}
 		if err != nil {

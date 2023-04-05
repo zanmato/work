@@ -1,15 +1,16 @@
 package work
 
 import (
+	"context"
 	"testing"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestHeartbeater(t *testing.T) {
-	pool := newTestPool(":6379")
+	rcl := newTestClient(RedisTestPort)
 	ns := "work"
 
 	tMock := int64(1425263409)
@@ -21,14 +22,14 @@ func TestHeartbeater(t *testing.T) {
 		"bar": nil,
 	}
 
-	heart := newWorkerPoolHeartbeater(ns, pool, "abcd", jobTypes, 10, []string{"ccc", "bbb"})
+	heart := newWorkerPoolHeartbeater(ns, rcl, "abcd", jobTypes, 10, []string{"ccc", "bbb"})
 	heart.start()
 
 	time.Sleep(20 * time.Millisecond)
 
-	assert.True(t, redisInSet(pool, redisKeyWorkerPools(ns), "abcd"))
+	assert.True(t, redisInSet(rcl, redisKeyWorkerPools(ns), "abcd"))
 
-	h := readHash(pool, redisKeyHeartbeat(ns, "abcd"))
+	h := readHash(rcl, redisKeyHeartbeat(ns, "abcd"))
 	assert.Equal(t, "1425263409", h["heartbeat_at"])
 	assert.Equal(t, "1425263409", h["started_at"])
 	assert.Equal(t, "bar,foo", h["job_names"])
@@ -40,14 +41,11 @@ func TestHeartbeater(t *testing.T) {
 
 	heart.stop()
 
-	assert.False(t, redisInSet(pool, redisKeyWorkerPools(ns), "abcd"))
+	assert.False(t, redisInSet(rcl, redisKeyWorkerPools(ns), "abcd"))
 }
 
-func redisInSet(pool *redis.Pool, key, member string) bool {
-	conn := pool.Get()
-	defer conn.Close()
-
-	v, err := redis.Bool(conn.Do("SISMEMBER", key, member))
+func redisInSet(redisClient *redis.Client, key, member string) bool {
+	v, err := redisClient.SIsMember(context.TODO(), key, member).Result()
 	if err != nil {
 		panic("could not delete retry/dead queue: " + err.Error())
 	}

@@ -1,17 +1,19 @@
 package work
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 type requeuer struct {
-	namespace string
-	pool      *redis.Pool
+	namespace   string
+	redisClient *redis.Client
 
 	redisRequeueScript *redis.Script
+	redisRequeueKeys   []string
 	redisRequeueArgs   []interface{}
 
 	stopChan         chan struct{}
@@ -21,21 +23,23 @@ type requeuer struct {
 	doneDrainingChan chan struct{}
 }
 
-func newRequeuer(namespace string, pool *redis.Pool, requeueKey string, jobNames []string) *requeuer {
-	args := make([]interface{}, 0, len(jobNames)+2+2)
-	args = append(args, requeueKey)              // KEY[1]
-	args = append(args, redisKeyDead(namespace)) // KEY[2]
+func newRequeuer(namespace string, redisClient *redis.Client, requeueKey string, jobNames []string) *requeuer {
+	keys := make([]string, 0, len(jobNames)+2)
+	keys = append(keys, requeueKey)              // KEY[1]
+	keys = append(keys, redisKeyDead(namespace)) // KEY[2]
 	for _, jobName := range jobNames {
-		args = append(args, redisKeyJobs(namespace, jobName)) // KEY[3, 4, ...]
+		keys = append(keys, redisKeyJobs(namespace, jobName)) // KEY[3, 4, ...]
 	}
+	args := make([]interface{}, 0, 2)
 	args = append(args, redisKeyJobsPrefix(namespace)) // ARGV[1]
 	args = append(args, 0)                             // ARGV[2] -- NOTE: We're going to change this one on every call
 
 	return &requeuer{
-		namespace: namespace,
-		pool:      pool,
+		namespace:   namespace,
+		redisClient: redisClient,
 
-		redisRequeueScript: redis.NewScript(len(jobNames)+2, redisLuaZremLpushCmd),
+		redisRequeueScript: redis.NewScript(redisLuaZremLpushCmd),
+		redisRequeueKeys:   keys,
 		redisRequeueArgs:   args,
 
 		stopChan:         make(chan struct{}),
@@ -65,7 +69,8 @@ func (r *requeuer) loop() {
 	// If we have 100 processes all running requeuers,
 	// there's probably too much hitting redis.
 	// So later on we'l have to implement exponential backoff
-	ticker := time.Tick(1000 * time.Millisecond)
+	ticker := time.NewTicker(1000 * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -76,7 +81,7 @@ func (r *requeuer) loop() {
 			for r.process() {
 			}
 			r.doneDrainingChan <- struct{}{}
-		case <-ticker:
+		case <-ticker.C:
 			for r.process() {
 			}
 		}
@@ -84,25 +89,25 @@ func (r *requeuer) loop() {
 }
 
 func (r *requeuer) process() bool {
-	conn := r.pool.Get()
-	defer conn.Close()
-
 	r.redisRequeueArgs[len(r.redisRequeueArgs)-1] = nowEpochSeconds()
 
-	res, err := redis.String(r.redisRequeueScript.Do(conn, r.redisRequeueArgs...))
-	if err == redis.ErrNil {
-		return false
-	} else if err != nil {
-		logError("requeuer.process", err)
+	res, err := r.redisRequeueScript.Run(
+		context.TODO(),
+		r.redisClient,
+		r.redisRequeueKeys,
+		r.redisRequeueArgs...,
+	).Text()
+	if err == redis.Nil {
 		return false
 	}
 
-	if res == "" {
+	switch res {
+	case "":
 		return false
-	} else if res == "dead" {
+	case "dead":
 		logError("requeuer.process.dead", fmt.Errorf("no job name"))
 		return true
-	} else if res == "ok" {
+	case "ok":
 		return true
 	}
 

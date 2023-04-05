@@ -1,0 +1,5 @@
+.DS_Store
+.idea
+.vscode
+go.work
+docker-compose.yml

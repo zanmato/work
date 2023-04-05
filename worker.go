@@ -1,12 +1,13 @@
 package work
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"reflect"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 const fetchKeysPerJobType = 6
@@ -15,7 +16,7 @@ type worker struct {
 	workerID      string
 	poolID        string
 	namespace     string
-	pool          *redis.Pool
+	redisClient   *redis.Client
 	jobTypes      map[string]*jobType
 	sleepBackoffs []int64
 	middleware    []*middlewareHandler
@@ -32,9 +33,9 @@ type worker struct {
 	doneDrainingChan chan struct{}
 }
 
-func newWorker(namespace string, poolID string, pool *redis.Pool, contextType reflect.Type, middleware []*middlewareHandler, jobTypes map[string]*jobType, sleepBackoffs []int64) *worker {
+func newWorker(namespace string, poolID string, redisClient *redis.Client, contextType reflect.Type, middleware []*middlewareHandler, jobTypes map[string]*jobType, sleepBackoffs []int64) *worker {
 	workerID := makeIdentifier()
-	ob := newObserver(namespace, pool, workerID)
+	ob := newObserver(namespace, redisClient, workerID)
 
 	if len(sleepBackoffs) == 0 {
 		sleepBackoffs = sleepBackoffsInMilliseconds
@@ -44,7 +45,7 @@ func newWorker(namespace string, poolID string, pool *redis.Pool, contextType re
 		workerID:      workerID,
 		poolID:        poolID,
 		namespace:     namespace,
-		pool:          pool,
+		redisClient:   redisClient,
 		contextType:   contextType,
 		sleepBackoffs: sleepBackoffs,
 
@@ -77,7 +78,7 @@ func (w *worker) updateMiddlewareAndJobTypes(middleware []*middlewareHandler, jo
 	}
 	w.sampler = sampler
 	w.jobTypes = jobTypes
-	w.redisFetchScript = redis.NewScript(len(jobTypes)*fetchKeysPerJobType, redisLuaFetchJob)
+	w.redisFetchScript = redis.NewScript(redisLuaFetchJob)
 }
 
 func (w *worker) start() {
@@ -145,18 +146,18 @@ func (w *worker) fetchJob() (*Job, error) {
 	// resort queues
 	// NOTE: we could optimize this to only resort every second, or something.
 	w.sampler.sample()
-	numKeys := len(w.sampler.samples) * fetchKeysPerJobType
-	var scriptArgs = make([]interface{}, 0, numKeys+1)
-
+	keys := make([]string, 0, len(w.sampler.samples)*fetchKeysPerJobType)
 	for _, s := range w.sampler.samples {
-		scriptArgs = append(scriptArgs, s.redisJobs, s.redisJobsInProg, s.redisJobsPaused, s.redisJobsLock, s.redisJobsLockInfo, s.redisJobsMaxConcurrency) // KEYS[1-6 * N]
+		keys = append(keys, s.redisJobs, s.redisJobsInProg, s.redisJobsPaused, s.redisJobsLock, s.redisJobsLockInfo, s.redisJobsMaxConcurrency) // KEYS[1-6 * N]
 	}
-	scriptArgs = append(scriptArgs, w.poolID) // ARGV[1]
-	conn := w.pool.Get()
-	defer conn.Close()
 
-	values, err := redis.Values(w.redisFetchScript.Do(conn, scriptArgs...))
-	if err == redis.ErrNil {
+	values, err := w.redisFetchScript.Run(
+		context.TODO(),
+		w.redisClient,
+		keys,
+		w.poolID,
+	).StringSlice()
+	if err == redis.Nil {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -166,22 +167,7 @@ func (w *worker) fetchJob() (*Job, error) {
 		return nil, fmt.Errorf("need 3 elements back")
 	}
 
-	rawJSON, ok := values[0].([]byte)
-	if !ok {
-		return nil, fmt.Errorf("response msg not bytes")
-	}
-
-	dequeuedFrom, ok := values[1].([]byte)
-	if !ok {
-		return nil, fmt.Errorf("response queue not bytes")
-	}
-
-	inProgQueue, ok := values[2].([]byte)
-	if !ok {
-		return nil, fmt.Errorf("response in prog not bytes")
-	}
-
-	job, err := newJob(rawJSON, dequeuedFrom, inProgQueue)
+	job, err := newJob([]byte(values[0]), []byte(values[1]), []byte(values[2]))
 	if err != nil {
 		return nil, err
 	}
@@ -233,17 +219,13 @@ func (w *worker) getAndDeleteUniqueJob(job *Job) *Job {
 		}
 	}
 
-	conn := w.pool.Get()
-	defer conn.Close()
-
-	rawJSON, err := redis.Bytes(conn.Do("GET", uniqueKey))
+	rawJSON, err := w.redisClient.Get(context.TODO(), uniqueKey).Bytes()
 	if err != nil {
 		logError("worker.delete_unique_job.get", err)
 		return nil
 	}
 
-	_, err = conn.Do("DEL", uniqueKey)
-	if err != nil {
+	if err := w.redisClient.Del(context.TODO(), uniqueKey).Err(); err != nil {
 		logError("worker.delete_unique_job.del", err)
 		return nil
 	}
@@ -265,30 +247,37 @@ func (w *worker) getAndDeleteUniqueJob(job *Job) *Job {
 }
 
 func (w *worker) removeJobFromInProgress(job *Job, fate terminateOp) {
-	conn := w.pool.Get()
-	defer conn.Close()
+	pl := w.redisClient.Pipeline()
 
-	conn.Send("MULTI")
-	conn.Send("LREM", job.inProgQueue, 1, job.rawJSON)
-	conn.Send("DECR", redisKeyJobsLock(w.namespace, job.Name))
-	conn.Send("HINCRBY", redisKeyJobsLockInfo(w.namespace, job.Name), w.poolID, -1)
-	fate(conn)
-	if _, err := conn.Do("EXEC"); err != nil {
+	pl.LRem(context.TODO(), string(job.inProgQueue), 1, job.rawJSON)
+	pl.Decr(context.TODO(), redisKeyJobsLock(w.namespace, job.Name))
+	pl.HIncrBy(context.TODO(), redisKeyJobsLockInfo(w.namespace, job.Name), w.poolID, -1)
+
+	fate(pl)
+	if _, err := pl.Exec(context.TODO()); err != nil {
 		logError("worker.remove_job_from_in_progress.lrem", err)
 	}
 }
 
-type terminateOp func(conn redis.Conn)
+type terminateOp func(pl redis.Pipeliner)
 
-func terminateOnly(_ redis.Conn) { return }
+func terminateOnly(_ redis.Pipeliner) {}
 func terminateAndRetry(w *worker, jt *jobType, job *Job) terminateOp {
 	rawJSON, err := job.serialize()
 	if err != nil {
 		logError("worker.terminate_and_retry.serialize", err)
 		return terminateOnly
 	}
-	return func(conn redis.Conn) {
-		conn.Send("ZADD", redisKeyRetry(w.namespace), nowEpochSeconds()+jt.calcBackoff(job), rawJSON)
+
+	return func(pl redis.Pipeliner) {
+		pl.ZAdd(
+			context.TODO(),
+			redisKeyRetry(w.namespace),
+			redis.Z{
+				Score:  float64(nowEpochSeconds() + jt.calcBackoff(job)),
+				Member: rawJSON,
+			},
+		)
 	}
 }
 func terminateAndDead(w *worker, job *Job) terminateOp {
@@ -297,13 +286,20 @@ func terminateAndDead(w *worker, job *Job) terminateOp {
 		logError("worker.terminate_and_dead.serialize", err)
 		return terminateOnly
 	}
-	return func(conn redis.Conn) {
+	return func(pl redis.Pipeliner) {
 		// NOTE: sidekiq limits the # of jobs: only keep jobs for 6 months, and only keep a max # of jobs
 		// The max # of jobs seems really horrible. Seems like operations should be on top of it.
 		// conn.Send("ZREMRANGEBYSCORE", redisKeyDead(w.namespace), "-inf", now - keepInterval)
 		// conn.Send("ZREMRANGEBYRANK", redisKeyDead(w.namespace), 0, -maxJobs)
 
-		conn.Send("ZADD", redisKeyDead(w.namespace), nowEpochSeconds(), rawJSON)
+		pl.ZAdd(
+			context.TODO(),
+			redisKeyDead(w.namespace),
+			redis.Z{
+				Score:  float64(nowEpochSeconds()),
+				Member: rawJSON,
+			},
+		)
 	}
 }
 

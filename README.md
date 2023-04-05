@@ -1,43 +1,42 @@
-# gocraft/work [![GoDoc](https://godoc.org/github.com/gocraft/work?status.png)](https://godoc.org/github.com/gocraft/work)
+# work 
 
-gocraft/work lets you enqueue and processes background jobs in Go. Jobs are durable and backed by Redis. Very similar to Sidekiq for Go.
+work lets you enqueue and processes background jobs in Go. Jobs are durable and backed by Redis.
 
-* Fast and efficient. Faster than [this](https://www.github.com/jrallison/go-workers), [this](https://www.github.com/benmanns/goworker), and [this](https://www.github.com/albrow/jobs). See below for benchmarks.
 * Reliable - don't lose jobs even if your process crashes.
 * Middleware on jobs -- good for metrics instrumentation, logging, etc.
 * If a job fails, it will be retried a specified number of times.
 * Schedule jobs to happen in the future.
 * Enqueue unique jobs so that only one job with a given name/arguments exists in the queue at once.
-* Web UI to manage failed jobs and observe the system.
 * Periodically enqueue jobs on a cron-like schedule.
 * Pause / unpause jobs and control concurrency within and across processes
 
 ## Enqueue new jobs
 
-To enqueue jobs, you need to make an Enqueuer with a redis namespace and a redigo pool. Each enqueued job has a name and can take optional arguments. Arguments are k/v pairs (serialized as JSON internally).
+To enqueue jobs, you need to make an Enqueuer with a redis namespace and a redis client. Each enqueued job has a name and can take optional arguments. Arguments are k/v pairs (serialized as JSON internally).
 
 ```go
 package main
 
 import (
-	"github.com/gomodule/redigo/redis"
-	"github.com/gocraft/work"
+	"github.com/redis/go-redis/v9"
+	"github.com/zanmato/work/v2"
 )
 
-// Make a redis pool
-var redisPool = &redis.Pool{
-	MaxActive: 5,
-	MaxIdle: 5,
-	Wait: true,
-	Dial: func() (redis.Conn, error) {
-		return redis.Dial("tcp", ":6379")
-	},
-}
-
-// Make an enqueuer with a particular namespace
-var enqueuer = work.NewEnqueuer("my_app_namespace", redisPool)
-
 func main() {
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:         ":6379",
+		Password:     "", // no password set
+		DB:           0,  // use default DB
+		MaxIdleConns: 5,
+		PoolSize:     5,
+	})
+
+	// Make an enqueuer with a particular namespace
+	enqueuer, err := work.NewEnqueuer("my_app_namespace", redisClient)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Enqueue a job named "send_email" with the specified parameters.
 	_, err := enqueuer.Enqueue("send_email", work.Q{"address": "test@example.com", "subject": "hello world", "customer_id": 4})
 	if err != nil {
@@ -56,33 +55,33 @@ In order to process jobs, you'll need to make a WorkerPool. Add middleware and j
 package main
 
 import (
-	"github.com/gomodule/redigo/redis"
-	"github.com/gocraft/work"
+	"github.com/redis/go-redis/v9"
+	"github.com/zanmato/work/v2"
 	"os"
 	"os/signal"
 )
-
-// Make a redis pool
-var redisPool = &redis.Pool{
-	MaxActive: 5,
-	MaxIdle: 5,
-	Wait: true,
-	Dial: func() (redis.Conn, error) {
-		return redis.Dial("tcp", ":6379")
-	},
-}
 
 type Context struct{
     customerID int64
 }
 
 func main() {
-	// Make a new pool. Arguments:
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:         ":6379",
+		Password:     "", // no password set
+		DB:           0,  // use default DB
+		MaxIdleConns: 5,
+		PoolSize:     5,
+	})
+
+	// Arguments:
 	// Context{} is a struct that will be the context for the request.
 	// 10 is the max concurrency
 	// "my_app_namespace" is the Redis namespace
-	// redisPool is a Redis pool
-	pool := work.NewWorkerPool(Context{}, 10, "my_app_namespace", redisPool)
+	pool, err := work.NewWorkerPool(Context{}, 10, "my_app_namespace", redisClient)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Add middleware that will be executed for each job
 	pool.Middleware((*Context).Log)
@@ -99,7 +98,7 @@ func main() {
 
 	// Wait for a signal to quit:
 	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt, os.Kill)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 	<-signalChan
 
 	// Stop the pool
@@ -143,16 +142,15 @@ func (c *Context) Export(job *work.Job) error {
 ```
 
 ## Redis Cluster
-If you're attempting to use gocraft/work on a `Redis Cluster` deployment, then you may encounter a `CROSSSLOT Keys in request don't hash to the same slot` error during the execution of the various lua scripts used to manage job data (see [Issue 93](https://github.com/gocraft/work/issues/93#issuecomment-401134340)). The current workaround is to force the keys for an entire `namespace` for a given worker pool on a single node in the cluster using [Redis Hash Tags](https://redis.io/topics/cluster-spec#keys-hash-tags). Using the example above:
+If you're attempting to use work on a `Redis Cluster` deployment, then you may encounter a `CROSSSLOT Keys in request don't hash to the same slot` error during the execution of the various lua scripts used to manage job data (see [Issue 93](https://github.com/gocraft/work/issues/93#issuecomment-401134340)). The current workaround is to force the keys for an entire `namespace` for a given worker pool on a single node in the cluster using [Redis Hash Tags](https://redis.io/topics/cluster-spec#keys-hash-tags). Using the example above:
 
 ```go
 func main() {
-	// Make a new pool. Arguments:
+	// Arguments:
 	// Context{} is a struct that will be the context for the request.
 	// 10 is the max concurrency
 	// "my_app_namespace" is the Redis namespace and the {} chars forces all of the keys onto a single node
-	// redisPool is a Redis pool
-	pool := work.NewWorkerPool(Context{}, 10, "{my_app_namespace}", redisPool)
+	pool, err := work.NewWorkerPool(Context{}, 10, "{my_app_namespace}", redisClient)
 ```
 
 *Note* this is not an issue for Redis Sentinel deployments.
@@ -161,7 +159,7 @@ func main() {
 
 ### Contexts
 
-Just like in [gocraft/web](https://www.github.com/gocraft/web), gocraft/work lets you use your own contexts. Your context can be empty or it can have various fields in it. The fields can be whatever you want - it's your type! When a new job is processed by a worker, we'll allocate an instance of this struct and pass it to your middleware and handlers. This allows you to pass information from one middleware function to the next, and onto your handlers.
+work lets you use your own contexts. Your context can be empty or it can have various fields in it. The fields can be whatever you want - it's your type! When a new job is processed by a worker, we'll allocate an instance of this struct and pass it to your middleware and handlers. This allows you to pass information from one middleware function to the next, and onto your handlers.
 
 Custom contexts aren't really needed for trivial example applications, but are very important for production apps. For instance, one field in your context can be your tagged logger. Your tagged logger augments your log statements with a job-id. This lets you filter your logs by that job-id.
 
@@ -195,7 +193,7 @@ Then in the web UI, you'll see the status of the worker:
 You can schedule jobs to be executed in the future. To do so, make a new ```Enqueuer``` and call its ```EnqueueIn``` method:
 
 ```go
-enqueuer := work.NewEnqueuer("my_app_namespace", redisPool)
+enqueuer, err := work.NewEnqueuer("my_app_namespace", redisPool)
 secondsInTheFuture := 300
 _, err := enqueuer.EnqueueIn("send_welcome_email", secondsInTheFuture, work.Q{"address": "test@example.com"})
 ```
@@ -205,7 +203,7 @@ _, err := enqueuer.EnqueueIn("send_welcome_email", secondsInTheFuture, work.Q{"a
 You can enqueue unique jobs so that only one job with a given name/arguments exists in the queue at once. For instance, you might have a worker that expires the cache of an object. It doesn't make sense for multiple such jobs to exist at once. Also note that unique jobs are supported for normal enqueues as well as scheduled enqueues.
 
 ```go
-enqueuer := work.NewEnqueuer("my_app_namespace", redisPool)
+enqueuer, err := work.NewEnqueuer("my_app_namespace", redisPool)
 job, err := enqueuer.EnqueueUnique("clear_cache", work.Q{"object_id_": "123"}) // job returned
 job, err = enqueuer.EnqueueUnique("clear_cache", work.Q{"object_id_": "123"}) // job == nil -- this duplicate job isn't enqueued.
 job, err = enqueuer.EnqueueUniqueIn("clear_cache", 300, work.Q{"object_id_": "789"}) // job != nil (diff id)
@@ -213,7 +211,7 @@ job, err = enqueuer.EnqueueUniqueIn("clear_cache", 300, work.Q{"object_id_": "78
 
 Alternatively, you can provide your own key for making a job unique. When another job is enqueued with the same key as a job already in the queue, it will simply update the arguments.
 ```go
-enqueuer := work.NewEnqueuer("my_app_namespace", redisPool)
+enqueuer, err := work.NewEnqueuer("my_app_namespace", redisPool)
 job, err := enqueuer.EnqueueUniqueByKey("clear_cache", work.Q{"object_id_": "123"}, map[string]interface{}{"my_key": "586"})
 job, err = enqueuer.EnqueueUniqueInByKey("clear_cache", 300, work.Q{"object_id_": "789"}, map[string]interface{}{"my_key": "586"})
 ```
@@ -221,10 +219,10 @@ For information on how this map will be serialized to form a unique key, see (ht
 
 ### Periodic Enqueueing (Cron)
 
-You can periodically enqueue jobs on your gocraft/work cluster using your worker pool. The [scheduling specification](https://godoc.org/github.com/robfig/cron#hdr-CRON_Expression_Format) uses a Cron syntax where the fields represent seconds, minutes, hours, day of the month, month, and week of the day, respectively. Even if you have multiple worker pools on different machines, they'll all coordinate and only enqueue your job once.
+You can periodically enqueue jobs on your work cluster using your worker pool. The [scheduling specification](https://godoc.org/github.com/robfig/cron#hdr-CRON_Expression_Format) uses a Cron syntax where the fields represent seconds, minutes, hours, day of the month, month, and week of the day, respectively. Even if you have multiple worker pools on different machines, they'll all coordinate and only enqueue your job once.
 
 ```go
-pool := work.NewWorkerPool(Context{}, 10, "my_app_namespace", redisPool)
+pool, err := work.NewWorkerPool(Context{}, 10, "my_app_namespace", redisClient)
 pool.PeriodicallyEnqueue("0 0 * * * *", "calculate_caches") // This will enqueue a "calculate_caches" job every hour
 pool.Job("calculate_caches", (*Context).CalculateCaches) // Still need to register a handler for this job separately
 ```
@@ -237,28 +235,6 @@ You can control job concurrency using `JobOptions{MaxConcurrency: <num>}`. Unlik
 ```go
       worker_pool.JobWithOptions(jobName, JobOptions{MaxConcurrency: 1}, (*Context).WorkFxn)
 ```
-
-
-## Run the Web UI
-
-The web UI provides a view to view the state of your gocraft/work cluster, inspect queued jobs, and retry or delete dead jobs.
-
-Building an installing the binary:
-```bash
-go get github.com/gocraft/work/cmd/workwebui
-go install github.com/gocraft/work/cmd/workwebui
-```
-
-Then, you can run it:
-```bash
-workwebui -redis="redis:6379" -ns="work" -listen=":5040"
-```
-
-Navigate to ```http://localhost:5040/```.
-
-You'll see a view that looks like this:
-
-![Web UI Screenshot](https://gocraft.github.io/work/images/webui.png)
 
 ## Design and concepts
 
@@ -347,31 +323,9 @@ You'll see a view that looks like this:
 * "paused jobs" - if paused key is present for a queue, then no jobs from that queue will be processed by any workers until that queue's paused key is removed
 * "job concurrency" - the number of jobs being actively processed  of a particular type across worker pool processes but within a single redis instance
 
-## Benchmarks
-
-The benches folder contains various benchmark code. In each case, we enqueue 100k jobs across 5 queues. The jobs are almost no-op jobs: they simply increment an atomic counter. We then measure the rate of change of the counter to obtain our measurement.
-
-| Library | Speed |
-| --- | --- |
-| [gocraft/work](https://www.github.com/gocraft/work) | **20944 jobs/s** |
-| [jrallison/go-workers](https://www.github.com/jrallison/go-workers) | 19945 jobs/s |
-| [benmanns/goworker](https://www.github.com/benmanns/goworker) | 10328.5 jobs/s |
-| [albrow/jobs](https://www.github.com/albrow/jobs) | 40 jobs/s |
-
-
-## gocraft
-
-gocraft offers a toolkit for building web apps. Currently these packages are available:
-
-* [gocraft/web](https://github.com/gocraft/web) - Go Router + Middleware. Your Contexts.
-* [gocraft/dbr](https://github.com/gocraft/dbr) - Additions to Go's database/sql for super fast performance and convenience.
-* [gocraft/health](https://github.com/gocraft/health) - Instrument your web apps with logging and metrics.
-* [gocraft/work](https://github.com/gocraft/work) - Process background jobs in Go.
-
-These packages were developed by the [engineering team](https://eng.uservoice.com) at [UserVoice](https://www.uservoice.com) and currently power much of its infrastructure and tech stack.
-
 ## Authors
 
+### gocraft/work
 * Jonathan Novak -- [https://github.com/cypriss](https://github.com/cypriss)
 * Tai-Lin Chu -- [https://github.com/taylorchu](https://github.com/taylorchu)
 * Sponsored by [UserVoice](https://eng.uservoice.com)

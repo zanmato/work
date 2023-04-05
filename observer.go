@@ -1,18 +1,19 @@
 package work
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 // An observer observes a single worker. Each worker has its own observer.
 type observer struct {
-	namespace string
-	workerID  string
-	pool      *redis.Pool
+	namespace   string
+	workerID    string
+	redisClient *redis.Client
 
 	// nil: worker isn't doing anything that we know of
 	// not nil: the last started observation that we received on the channel.
@@ -62,11 +63,11 @@ type observation struct {
 
 const observerBufferSize = 1024
 
-func newObserver(namespace string, pool *redis.Pool, workerID string) *observer {
+func newObserver(namespace string, redisClient *redis.Client, workerID string) *observer {
 	return &observer{
 		namespace:        namespace,
 		workerID:         workerID,
-		pool:             pool,
+		redisClient:      redisClient,
 		observationsChan: make(chan *observation, observerBufferSize),
 
 		stopChan:         make(chan struct{}),
@@ -124,7 +125,8 @@ func (o *observer) loop() {
 	// Every tick we'll update redis if necessary
 	// We don't update it on every job because the only purpose of this data is for humans to inspect the system,
 	// and a fast worker could move onto new jobs every few ms.
-	ticker := time.Tick(1000 * time.Millisecond)
+	ticker := time.NewTicker(1000 * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -145,7 +147,7 @@ func (o *observer) loop() {
 					break DRAIN_LOOP
 				}
 			}
-		case <-ticker:
+		case <-ticker.C:
 			if o.lastWrittenVersion != o.version {
 				if err := o.writeStatus(o.currentStartedObservation); err != nil {
 					logError("observer.write", err)
@@ -183,13 +185,10 @@ func (o *observer) process(obv *observation) {
 }
 
 func (o *observer) writeStatus(obv *observation) error {
-	conn := o.pool.Get()
-	defer conn.Close()
-
 	key := redisKeyWorkerObservation(o.namespace, o.workerID)
 
 	if obv == nil {
-		if _, err := conn.Do("DEL", key); err != nil {
+		if err := o.redisClient.Del(context.TODO(), key).Err(); err != nil {
 			return err
 		}
 	} else {
@@ -212,9 +211,8 @@ func (o *observer) writeStatus(obv *observation) error {
 			}
 		}
 
-		args := make([]interface{}, 0, 13)
+		args := make([]interface{}, 0, 12)
 		args = append(args,
-			key,
 			"job_name", obv.jobName,
 			"job_id", obv.jobID,
 			"started_at", obv.startedAt,
@@ -228,9 +226,11 @@ func (o *observer) writeStatus(obv *observation) error {
 			)
 		}
 
-		conn.Send("HMSET", args...)
-		conn.Send("EXPIRE", key, 60*60*24)
-		if err := conn.Flush(); err != nil {
+		pl := o.redisClient.Pipeline()
+
+		pl.HMSet(context.TODO(), key, args...)
+		pl.Expire(context.TODO(), key, time.Second*60*60*24)
+		if _, err := pl.Exec(context.TODO()); err != nil {
 			return err
 		}
 
