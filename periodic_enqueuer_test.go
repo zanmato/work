@@ -22,11 +22,12 @@ func TestPeriodicEnqueuer(t *testing.T) {
 	setNowEpochSecondsMock(1468359453)
 	defer resetNowEpochSecondsMock()
 
-	pe := newPeriodicEnqueuer(ns, rcl, pjs)
+	lgr := NewTestLogger(t)
+	pe := newPeriodicEnqueuer(ns, rcl, pjs, lgr)
 	err := pe.enqueue()
 	assert.NoError(t, err)
 
-	c := NewClient(ns, rcl)
+	c := NewClient(ns, rcl, lgr)
 	scheduledJobs, count, err := c.ScheduledJobs(1)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 20, count)
@@ -99,7 +100,7 @@ func TestPeriodicEnqueuerSpawn(t *testing.T) {
 	ns := "work"
 	cleanKeyspace(ns, rcl)
 
-	pe := newPeriodicEnqueuer(ns, rcl, nil)
+	pe := newPeriodicEnqueuer(ns, rcl, nil, NewTestLogger(t))
 	pe.start()
 	pe.stop()
 }

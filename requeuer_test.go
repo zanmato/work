@@ -29,7 +29,7 @@ func TestRequeue(t *testing.T) {
 
 	resetNowEpochSecondsMock()
 
-	re := newRequeuer(ns, rcl, redisKeyScheduled(ns), []string{"wat", "foo", "bar"})
+	re := newRequeuer(ns, rcl, redisKeyScheduled(ns), []string{"wat", "foo", "bar"}, NewTestLogger(t))
 	re.start()
 	re.drain()
 	re.stop()
@@ -65,7 +65,7 @@ func TestRequeueUnknown(t *testing.T) {
 	nowish := nowEpochSeconds()
 	setNowEpochSecondsMock(nowish)
 
-	re := newRequeuer(ns, rcl, redisKeyScheduled(ns), []string{"bar"})
+	re := newRequeuer(ns, rcl, redisKeyScheduled(ns), []string{"bar"}, NewTestLogger(t))
 	re.start()
 	re.drain()
 	re.stop()

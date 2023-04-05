@@ -22,7 +22,8 @@ func TestHeartbeater(t *testing.T) {
 		"bar": nil,
 	}
 
-	heart := newWorkerPoolHeartbeater(ns, rcl, "abcd", jobTypes, 10, []string{"ccc", "bbb"})
+	heart, err := newWorkerPoolHeartbeater(ns, rcl, "abcd", jobTypes, 10, []string{"ccc", "bbb"}, nil)
+	assert.NoError(t, err)
 	heart.start()
 
 	time.Sleep(20 * time.Millisecond)

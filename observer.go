@@ -3,7 +3,6 @@ package work
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -14,6 +13,7 @@ type observer struct {
 	namespace   string
 	workerID    string
 	redisClient *redis.Client
+	logger      Logger
 
 	// nil: worker isn't doing anything that we know of
 	// not nil: the last started observation that we received on the channel.
@@ -63,11 +63,12 @@ type observation struct {
 
 const observerBufferSize = 1024
 
-func newObserver(namespace string, redisClient *redis.Client, workerID string) *observer {
+func newObserver(namespace string, redisClient *redis.Client, workerID string, logger Logger) *observer {
 	return &observer{
 		namespace:        namespace,
 		workerID:         workerID,
 		redisClient:      redisClient,
+		logger:           logger,
 		observationsChan: make(chan *observation, observerBufferSize),
 
 		stopChan:         make(chan struct{}),
@@ -141,7 +142,9 @@ func (o *observer) loop() {
 					o.process(obv)
 				default:
 					if err := o.writeStatus(o.currentStartedObservation); err != nil {
-						logError("observer.write", err)
+						if o.logger != nil {
+							o.logger.Printf("observer.write: %s", err)
+						}
 					}
 					o.doneDrainingChan <- struct{}{}
 					break DRAIN_LOOP
@@ -150,7 +153,9 @@ func (o *observer) loop() {
 		case <-ticker.C:
 			if o.lastWrittenVersion != o.version {
 				if err := o.writeStatus(o.currentStartedObservation); err != nil {
-					logError("observer.write", err)
+					if o.logger != nil {
+						o.logger.Printf("observer.write: %s", err)
+					}
 				}
 				o.lastWrittenVersion = o.version
 			}
@@ -170,7 +175,9 @@ func (o *observer) process(obv *observation) {
 			o.currentStartedObservation.checkin = obv.checkin
 			o.currentStartedObservation.checkinAt = obv.checkinAt
 		} else {
-			logError("observer.checkin_mismatch", fmt.Errorf("got checkin but mismatch on job ID or no job"))
+			if o.logger != nil {
+				o.logger.Printf("observer.checkin_mismatch: got checkin but mismatch on job ID or no jobs")
+			}
 		}
 	}
 	o.version++
@@ -178,7 +185,9 @@ func (o *observer) process(obv *observation) {
 	// If this is the version observation we got, just go ahead and write it.
 	if o.version == 1 {
 		if err := o.writeStatus(o.currentStartedObservation); err != nil {
-			logError("observer.first_write", err)
+			if o.logger != nil {
+				o.logger.Printf("observer.first_write: %s", err)
+			}
 		}
 		o.lastWrittenVersion = o.version
 	}

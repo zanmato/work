@@ -78,7 +78,9 @@ func main() {
 	// Context{} is a struct that will be the context for the request.
 	// 10 is the max concurrency
 	// "my_app_namespace" is the Redis namespace
-	pool, err := work.NewWorkerPool(Context{}, 10, "my_app_namespace", redisClient)
+	pool, err := work.NewWorkerPoolWithOptions(Context{}, 10, "my_app_namespace", redisClient, work.WorkerPoolOptions{
+		Logger: log.Default(),
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -130,6 +132,7 @@ func (c *Context) SendEmail(job *work.Job) error {
 		return err
 	}
 
+	fmt.Println("Sending email to: ", addr, " with subject: ", subject)
 	// Go ahead and send the email...
 	// sendEmailTo(addr, subject)
 

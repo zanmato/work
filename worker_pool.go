@@ -19,6 +19,7 @@ type WorkerPool struct {
 	namespace     string // eg, "myapp-work"
 	redisClient   *redis.Client
 	sleepBackoffs []int64
+	logger        Logger
 
 	contextType  reflect.Type
 	jobTypes     map[string]*jobType
@@ -68,6 +69,7 @@ type JobOptions struct {
 // WorkerPoolOptions can be passed to NewWorkerPoolWithOptions.
 type WorkerPoolOptions struct {
 	SleepBackoffs []int64 // Sleep backoffs in milliseconds
+	Logger        Logger
 }
 
 // GenericHandler is a job handler without any custom context.
@@ -111,10 +113,11 @@ func NewWorkerPoolWithOptions(ctx interface{}, concurrency uint, namespace strin
 		sleepBackoffs: workerPoolOpts.SleepBackoffs,
 		contextType:   ctxType,
 		jobTypes:      make(map[string]*jobType),
+		logger:        workerPoolOpts.Logger,
 	}
 
 	for i := uint(0); i < wp.concurrency; i++ {
-		w := newWorker(wp.namespace, wp.workerPoolID, wp.redisClient, wp.contextType, nil, wp.jobTypes, wp.sleepBackoffs)
+		w := newWorker(wp.namespace, wp.workerPoolID, wp.redisClient, wp.contextType, nil, wp.jobTypes, wp.sleepBackoffs, wp.logger)
 		wp.workers = append(wp.workers, w)
 	}
 
@@ -205,9 +208,9 @@ func (wp *WorkerPool) PeriodicallyEnqueue(spec string, jobName string) (*WorkerP
 }
 
 // Start starts the workers and associated processes.
-func (wp *WorkerPool) Start() {
+func (wp *WorkerPool) Start() error {
 	if wp.started {
-		return
+		return nil
 	}
 	wp.started = true
 
@@ -219,11 +222,26 @@ func (wp *WorkerPool) Start() {
 		go w.start()
 	}
 
-	wp.heartbeater = newWorkerPoolHeartbeater(wp.namespace, wp.redisClient, wp.workerPoolID, wp.jobTypes, wp.concurrency, wp.workerIDs())
+	var err error
+	wp.heartbeater, err = newWorkerPoolHeartbeater(
+		wp.namespace,
+		wp.redisClient,
+		wp.workerPoolID,
+		wp.jobTypes,
+		wp.concurrency,
+		wp.workerIDs(),
+		wp.logger,
+	)
+	if err != nil {
+		return err
+	}
+
 	wp.heartbeater.start()
 	wp.startRequeuers()
-	wp.periodicEnqueuer = newPeriodicEnqueuer(wp.namespace, wp.redisClient, wp.periodicJobs)
+	wp.periodicEnqueuer = newPeriodicEnqueuer(wp.namespace, wp.redisClient, wp.periodicJobs, wp.logger)
 	wp.periodicEnqueuer.start()
+
+	return nil
 }
 
 // Stop stops the workers and associated processes.
@@ -267,9 +285,9 @@ func (wp *WorkerPool) startRequeuers() {
 	for k := range wp.jobTypes {
 		jobNames = append(jobNames, k)
 	}
-	wp.retrier = newRequeuer(wp.namespace, wp.redisClient, redisKeyRetry(wp.namespace), jobNames)
-	wp.scheduler = newRequeuer(wp.namespace, wp.redisClient, redisKeyScheduled(wp.namespace), jobNames)
-	wp.deadPoolReaper = newDeadPoolReaper(wp.namespace, wp.redisClient, jobNames)
+	wp.retrier = newRequeuer(wp.namespace, wp.redisClient, redisKeyRetry(wp.namespace), jobNames, wp.logger)
+	wp.scheduler = newRequeuer(wp.namespace, wp.redisClient, redisKeyScheduled(wp.namespace), jobNames, wp.logger)
+	wp.deadPoolReaper = newDeadPoolReaper(wp.namespace, wp.redisClient, jobNames, wp.logger)
 	wp.retrier.start()
 	wp.scheduler.start()
 	wp.deadPoolReaper.start()
@@ -296,7 +314,9 @@ func (wp *WorkerPool) writeKnownJobsToRedis() {
 	}
 
 	if err := wp.redisClient.SAdd(context.TODO(), key, jobNames...).Err(); err != nil {
-		logError("write_known_jobs", err)
+		if wp.logger != nil {
+			wp.logger.Printf("error writing known jobs to redis: %s", err)
+		}
 	}
 }
 
@@ -312,7 +332,9 @@ func (wp *WorkerPool) writeConcurrencyControlsToRedis() {
 			jobType.MaxConcurrency,
 			0,
 		).Err(); err != nil {
-			logError("write_concurrency_controls_max_concurrency", err)
+			if wp.logger != nil {
+				wp.logger.Printf("write_concurrency_controls_max_concurrency: %s", err)
+			}
 		}
 	}
 }

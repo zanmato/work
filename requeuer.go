@@ -2,7 +2,6 @@ package work
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -11,6 +10,7 @@ import (
 type requeuer struct {
 	namespace   string
 	redisClient *redis.Client
+	logger      Logger
 
 	redisRequeueScript *redis.Script
 	redisRequeueKeys   []string
@@ -23,7 +23,7 @@ type requeuer struct {
 	doneDrainingChan chan struct{}
 }
 
-func newRequeuer(namespace string, redisClient *redis.Client, requeueKey string, jobNames []string) *requeuer {
+func newRequeuer(namespace string, redisClient *redis.Client, requeueKey string, jobNames []string, logger Logger) *requeuer {
 	keys := make([]string, 0, len(jobNames)+2)
 	keys = append(keys, requeueKey)              // KEY[1]
 	keys = append(keys, redisKeyDead(namespace)) // KEY[2]
@@ -37,6 +37,7 @@ func newRequeuer(namespace string, redisClient *redis.Client, requeueKey string,
 	return &requeuer{
 		namespace:   namespace,
 		redisClient: redisClient,
+		logger:      logger,
 
 		redisRequeueScript: redis.NewScript(redisLuaZremLpushCmd),
 		redisRequeueKeys:   keys,
@@ -105,7 +106,9 @@ func (r *requeuer) process() bool {
 	case "":
 		return false
 	case "dead":
-		logError("requeuer.process.dead", fmt.Errorf("no job name"))
+		if r.logger != nil {
+			r.logger.Printf("requeuer.process.dead: no job name")
+		}
 		return true
 	case "ok":
 		return true

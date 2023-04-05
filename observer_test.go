@@ -17,7 +17,7 @@ func TestObserverStarted(t *testing.T) {
 	setNowEpochSecondsMock(tMock)
 	defer resetNowEpochSecondsMock()
 
-	observer := newObserver(ns, rcl, "abcd")
+	observer := newObserver(ns, rcl, "abcd", NewTestLogger(t))
 	observer.start()
 	observer.observeStarted("foo", "bar", Q{"a": 1, "b": "wat"})
 	//observer.observeDone("foo", "bar", nil)
@@ -39,7 +39,7 @@ func TestObserverStartedDone(t *testing.T) {
 	setNowEpochSecondsMock(tMock)
 	defer resetNowEpochSecondsMock()
 
-	observer := newObserver(ns, rcl, "abcd")
+	observer := newObserver(ns, rcl, "abcd", NewTestLogger(t))
 	observer.start()
 	observer.observeStarted("foo", "bar", Q{"a": 1, "b": "wat"})
 	observer.observeDone("foo", "bar", nil)
@@ -54,7 +54,7 @@ func TestObserverCheckin(t *testing.T) {
 	rcl := newTestClient(RedisTestPort)
 	ns := "work"
 
-	observer := newObserver(ns, rcl, "abcd")
+	observer := newObserver(ns, rcl, "abcd", NewTestLogger(t))
 	observer.start()
 
 	tMock := int64(1425263401)
@@ -81,7 +81,7 @@ func TestObserverCheckinFromJob(t *testing.T) {
 	rcl := newTestClient(RedisTestPort)
 	ns := "work"
 
-	observer := newObserver(ns, rcl, "abcd")
+	observer := newObserver(ns, rcl, "abcd", NewTestLogger(t))
 	observer.start()
 
 	tMock := int64(1425263401)

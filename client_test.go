@@ -17,19 +17,24 @@ func TestClientWorkerPoolHeartbeats(t *testing.T) {
 	ns := "work"
 	cleanKeyspace(ns, rcl)
 
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	lgr := NewTestLogger(t)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: lgr,
+	})
 	wp.Job("wat", func(job *Job) error { return nil })
 	wp.Job("bob", func(job *Job) error { return nil })
 	wp.Start()
 
-	wp2, _ := NewWorkerPool(TestContext{}, 11, ns, rcl)
+	wp2, _ := NewWorkerPoolWithOptions(TestContext{}, 11, ns, rcl, WorkerPoolOptions{
+		Logger: lgr,
+	})
 	wp2.Job("foo", func(job *Job) error { return nil })
 	wp2.Job("bar", func(job *Job) error { return nil })
 	wp2.Start()
 
 	time.Sleep(20 * time.Millisecond)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, lgr)
 
 	hbs, err := client.WorkerPoolHeartbeats()
 	assert.NoError(t, err)
@@ -75,7 +80,10 @@ func TestClientWorkerObservations(t *testing.T) {
 	_, err = enqueuer.Enqueue("foo", Q{"a": 3, "b": 4})
 	assert.Nil(t, err)
 
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	lgr := NewTestLogger(t)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: lgr,
+	})
 	wp.Job("wat", func(job *Job) error {
 		time.Sleep(50 * time.Millisecond)
 		return nil
@@ -88,7 +96,7 @@ func TestClientWorkerObservations(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, lgr)
 	observations, err := client.WorkerObservations()
 	assert.NoError(t, err)
 	assert.Equal(t, 10, len(observations))
@@ -150,7 +158,10 @@ func TestClientQueues(t *testing.T) {
 
 	// Start a pool to work on it. It's going to work on the queues
 	// side effect of that is knowing which jobs are avail
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	lgr := NewTestLogger(t)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: lgr,
+	})
 	wp.Job("wat", func(job *Job) error {
 		return nil
 	})
@@ -173,7 +184,7 @@ func TestClientQueues(t *testing.T) {
 	enqueuer.Enqueue("wat", nil)
 
 	setNowEpochSecondsMock(1425263709)
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, lgr)
 	queues, err := client.Queues()
 	assert.NoError(t, err)
 
@@ -207,7 +218,7 @@ func TestClientScheduledJobs(t *testing.T) {
 	_, err = enqueuer.EnqueueIn("foo", 2, Q{"a": 3, "b": 4})
 	assert.NoError(t, err)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	jobs, count, err := client.ScheduledJobs(1)
 	assert.NoError(t, err)
 	assert.Equal(t, 3, len(jobs))
@@ -256,7 +267,10 @@ func TestClientRetryJobs(t *testing.T) {
 
 	setNowEpochSecondsMock(1425263429)
 
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	lgr := NewTestLogger(t)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: lgr,
+	})
 	wp.Job("wat", func(job *Job) error {
 		return fmt.Errorf("ohno")
 	})
@@ -264,7 +278,7 @@ func TestClientRetryJobs(t *testing.T) {
 	wp.Drain()
 	wp.Stop()
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, lgr)
 	jobs, count, err := client.RetryJobs(1)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(jobs))
@@ -295,7 +309,10 @@ func TestClientDeadJobs(t *testing.T) {
 
 	setNowEpochSecondsMock(1425263429)
 
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	lgr := NewTestLogger(t)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: lgr,
+	})
 	wp.JobWithOptions("wat", JobOptions{Priority: 1, MaxFails: 1}, func(job *Job) error {
 		return fmt.Errorf("ohno")
 	})
@@ -303,7 +320,7 @@ func TestClientDeadJobs(t *testing.T) {
 	wp.Drain()
 	wp.Stop()
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, lgr)
 	jobs, count, err := client.DeadJobs(1)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(jobs))
@@ -347,7 +364,7 @@ func TestClientDeleteDeadJob(t *testing.T) {
 	insertDeadJob(ns, rcl, "wat", 12345, 12349)
 	insertDeadJob(ns, rcl, "wat", 12345, 12350)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	jobs, count, err := client.DeadJobs(1)
 	assert.NoError(t, err)
 	assert.Equal(t, 4, len(jobs))
@@ -376,7 +393,7 @@ func TestClientRetryDeadJob(t *testing.T) {
 	insertDeadJob(ns, rcl, "wat3", 12345, 12349)
 	insertDeadJob(ns, rcl, "wat4", 12345, 12350)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	jobs, count, err := client.DeadJobs(1)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 4, len(jobs))
@@ -453,7 +470,7 @@ func TestClientRetryDeadJobWithArgs(t *testing.T) {
 		panic(err)
 	}
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	assert.NoError(t, client.RetryDeadJob(failAt, job.ID))
 
 	job1 := getQueuedJob(ns, rcl, name)
@@ -475,7 +492,7 @@ func TestClientDeleteAllDeadJobs(t *testing.T) {
 	insertDeadJob(ns, rcl, "wat", 12345, 12349)
 	insertDeadJob(ns, rcl, "wat", 12345, 12350)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	jobs, count, err := client.DeadJobs(1)
 	assert.NoError(t, err)
 	assert.Equal(t, 4, len(jobs))
@@ -503,7 +520,7 @@ func TestClientRetryAllDeadJobs(t *testing.T) {
 	insertDeadJob(ns, rcl, "wat3", 12345, 12349)
 	insertDeadJob(ns, rcl, "wat4", 12345, 12350)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	jobs, count, err := client.DeadJobs(1)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 4, len(jobs))
@@ -603,7 +620,7 @@ func TestClientRetryAllDeadJobsBig(t *testing.T) {
 		panic(err)
 	}
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	_, count, err := client.DeadJobs(1)
 	assert.NoError(t, err)
 	assert.Equal(t, uint64(10001), count)
@@ -628,7 +645,7 @@ func TestClientDeleteScheduledJob(t *testing.T) {
 	cleanKeyspace(ns, rcl)
 
 	// Delete an invalid job. Make sure we get error
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	err := client.DeleteScheduledJob(3, "bob")
 	assert.Equal(t, ErrNotDeleted, err)
 
@@ -654,7 +671,7 @@ func TestClientDeleteScheduledUniqueJob(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, j)
 
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, NewTestLogger(t))
 	err = client.DeleteScheduledJob(j.RunAt, j.ID)
 	assert.NoError(t, err)
 	assert.EqualValues(t, 0, zsetSize(rcl, redisKeyScheduled(ns)))
@@ -678,7 +695,10 @@ func TestClientDeleteRetryJob(t *testing.T) {
 
 	setNowEpochSecondsMock(1425263429)
 
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	lgr := NewTestLogger(t)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: lgr,
+	})
 	wp.Job("wat", func(job *Job) error {
 		return fmt.Errorf("ohno")
 	})
@@ -687,7 +707,7 @@ func TestClientDeleteRetryJob(t *testing.T) {
 	wp.Stop()
 
 	// Ok so now we have a retry job
-	client := NewClient(ns, rcl)
+	client := NewClient(ns, rcl, lgr)
 	jobs, count, err := client.RetryJobs(1)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(jobs))

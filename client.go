@@ -22,13 +22,15 @@ var ErrNotRetried = fmt.Errorf("nothing retried")
 type Client struct {
 	namespace   string
 	redisClient *redis.Client
+	logger      Logger
 }
 
 // NewClient creates a new Client with the specified redis namespace and connection pool.
-func NewClient(namespace string, redisClient *redis.Client) *Client {
+func NewClient(namespace string, redisClient *redis.Client, logger Logger) *Client {
 	return &Client{
 		namespace:   namespace,
 		redisClient: redisClient,
+		logger:      logger,
 	}
 }
 
@@ -62,8 +64,7 @@ func (c *Client) WorkerPoolHeartbeats() ([]*WorkerPoolHeartbeat, error) {
 		key := redisKeyHeartbeat(c.namespace, wpid)
 		vals, err := conn.HGetAll(context.TODO(), key).Result()
 		if err != nil {
-			logError("worker_pool_statuses.receive", err)
-			return nil, err
+			return nil, fmt.Errorf("worker_pool_statuses.receive: %w", err)
 		}
 
 		heartbeat := &WorkerPoolHeartbeat{
@@ -95,8 +96,7 @@ func (c *Client) WorkerPoolHeartbeats() ([]*WorkerPoolHeartbeat, error) {
 				sort.Strings(heartbeat.WorkerIDs)
 			}
 			if err != nil {
-				logError("worker_pool_statuses.parse", err)
-				return nil, err
+				return nil, fmt.Errorf("worker_pool_statuses.parse: %w", err)
 			}
 		}
 
@@ -124,8 +124,7 @@ type WorkerObservation struct {
 func (c *Client) WorkerObservations() ([]*WorkerObservation, error) {
 	hbs, err := c.WorkerPoolHeartbeats()
 	if err != nil {
-		logError("worker_observations.worker_pool_heartbeats", err)
-		return nil, err
+		return nil, fmt.Errorf("worker_observations.worker_pool_heartbeats: %w", err)
 	}
 
 	var workerIDs []string
@@ -138,8 +137,7 @@ func (c *Client) WorkerObservations() ([]*WorkerObservation, error) {
 		key := redisKeyWorkerObservation(c.namespace, wid)
 		vals, err := c.redisClient.HGetAll(context.TODO(), key).Result()
 		if err != nil {
-			logError("worker_observations.receive", err)
-			return nil, err
+			return nil, fmt.Errorf("worker_observations.receive: %w", err)
 		}
 
 		ob := &WorkerObservation{
@@ -165,8 +163,7 @@ func (c *Client) WorkerObservations() ([]*WorkerObservation, error) {
 				ob.CheckinAt, err = strconv.ParseInt(value, 10, 64)
 			}
 			if err != nil {
-				logError("worker_observations.parse", err)
-				return nil, err
+				return nil, fmt.Errorf("worker_observations.parse: %w", err)
 			}
 		}
 
@@ -197,8 +194,7 @@ func (c *Client) Queues() ([]*Queue, error) {
 	for _, jobName := range jobNames {
 		count, err := c.redisClient.LLen(context.TODO(), redisKeyJobs(c.namespace, jobName)).Result()
 		if err != nil {
-			logError("client.queues.receive", err)
-			return nil, err
+			return nil, fmt.Errorf("client.queues.receive: %w", err)
 		}
 
 		queue := &Queue{
@@ -214,13 +210,12 @@ func (c *Client) Queues() ([]*Queue, error) {
 		if s.Count > 0 {
 			b, err := c.redisClient.LIndex(context.TODO(), redisKeyJobs(c.namespace, s.JobName), -1).Bytes()
 			if err != nil {
-				logError("client.queues.receive2", err)
-				return nil, err
+				return nil, fmt.Errorf("client.queues.receive2: %w", err)
 			}
 
 			job, err := newJob(b, nil, nil)
 			if err != nil {
-				logError("client.queues.new_job", err)
+				return nil, fmt.Errorf("client.queues.new_job: %w", err)
 			}
 			s.Latency = now - job.EnqueuedAt
 		}
@@ -252,8 +247,7 @@ func (c *Client) ScheduledJobs(page uint) ([]*ScheduledJob, uint64, error) {
 	key := redisKeyScheduled(c.namespace)
 	jobsWithScores, count, err := c.getZsetPage(key, page)
 	if err != nil {
-		logError("client.scheduled_jobs.get_zset_page", err)
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("client.scheduled_jobs.get_zset_page: %w", err)
 	}
 
 	jobs := make([]*ScheduledJob, 0, len(jobsWithScores))
@@ -269,8 +263,7 @@ func (c *Client) RetryJobs(page uint) ([]*RetryJob, uint64, error) {
 	key := redisKeyRetry(c.namespace)
 	jobsWithScores, count, err := c.getZsetPage(key, page)
 	if err != nil {
-		logError("client.retry_jobs.get_zset_page", err)
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("client.retry_jobs.get_zset_page: %w", err)
 	}
 
 	jobs := make([]*RetryJob, 0, len(jobsWithScores))
@@ -287,8 +280,7 @@ func (c *Client) DeadJobs(page uint) ([]*DeadJob, uint64, error) {
 	key := redisKeyDead(c.namespace)
 	jobsWithScores, count, err := c.getZsetPage(key, page)
 	if err != nil {
-		logError("client.dead_jobs.get_zset_page", err)
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("client.dead_jobs.get_zset_page: %w", err)
 	}
 
 	jobs := make([]*DeadJob, 0, len(jobsWithScores))
@@ -316,8 +308,7 @@ func (c *Client) RetryDeadJob(diedAt int64, jobID string) error {
 	// Get queues for job names
 	queues, err := c.Queues()
 	if err != nil {
-		logError("client.retry_all_dead_jobs.queues", err)
-		return err
+		return fmt.Errorf("client.retry_all_dead_jobs.queues: %w", err)
 	}
 
 	// Extract job names
@@ -344,8 +335,7 @@ func (c *Client) RetryDeadJob(diedAt int64, jobID string) error {
 		jobID,
 	).Int64()
 	if err != nil {
-		logError("client.retry_dead_job.do", err)
-		return err
+		return fmt.Errorf("client.retry_dead_job.do: %w", err)
 	}
 
 	if cnt == 0 {
@@ -360,8 +350,7 @@ func (c *Client) RetryAllDeadJobs() error {
 	// Get queues for job names
 	queues, err := c.Queues()
 	if err != nil {
-		logError("client.retry_all_dead_jobs.queues", err)
-		return err
+		return fmt.Errorf("client.retry_all_dead_jobs.queues: %w", err)
 	}
 
 	// Extract job names
@@ -389,8 +378,7 @@ func (c *Client) RetryAllDeadJobs() error {
 	for i := 0; i < 1000; i++ {
 		res, err := script.Run(context.TODO(), c.redisClient, keys, args...).Int64()
 		if err != nil {
-			logError("client.retry_all_dead_jobs.do", err)
-			return err
+			return fmt.Errorf("client.retry_all_dead_jobs.do: %w", err)
 		}
 
 		if res == 0 {
@@ -404,8 +392,7 @@ func (c *Client) RetryAllDeadJobs() error {
 // DeleteAllDeadJobs deletes all dead jobs.
 func (c *Client) DeleteAllDeadJobs() error {
 	if err := c.redisClient.Del(context.TODO(), redisKeyDead(c.namespace)).Err(); err != nil {
-		logError("client.delete_all_dead_jobs", err)
-		return err
+		return fmt.Errorf("client.delete_all_dead_jobs: %w", err)
 	}
 
 	return nil
@@ -422,20 +409,17 @@ func (c *Client) DeleteScheduledJob(scheduledFor int64, jobID string) error {
 	if len(jobBytes) > 0 {
 		job, err := newJob(jobBytes, nil, nil)
 		if err != nil {
-			logError("client.delete_scheduled_job.new_job", err)
-			return err
+			return fmt.Errorf("client.delete_scheduled_job.new_job: %w", err)
 		}
 
 		if job.Unique {
 			uniqueKey, err := redisKeyUniqueJob(c.namespace, job.Name, job.Args)
 			if err != nil {
-				logError("client.delete_scheduled_job.redis_key_unique_job", err)
-				return err
+				return fmt.Errorf("client.delete_scheduled_job.redis_key_unique_job: %w", err)
 			}
 
 			if err := c.redisClient.Del(context.TODO(), uniqueKey).Err(); err != nil {
-				logError("worker.delete_unique_job.del", err)
-				return err
+				return fmt.Errorf("worker.delete_unique_job.del: %w", err)
 			}
 		}
 	}
@@ -464,8 +448,7 @@ func (c *Client) deleteZsetJob(zsetKey string, zscore int64, jobID string) (bool
 
 	values, err := script.Run(context.TODO(), c.redisClient, []string{zsetKey}, zscore, jobID).Slice()
 	if err != nil {
-		logError("client.delete_zset_job", err)
-		return false, nil, err
+		return false, nil, fmt.Errorf("client.delete_zset_job: %w", err)
 	}
 
 	if len(values) != 2 {
@@ -504,8 +487,7 @@ func (c *Client) getZsetPage(key string, page uint) ([]jobScore, uint64, error) 
 		Count:  20,
 	}).Result()
 	if err != nil {
-		logError("client.get_zset_page.values", err)
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("client.get_zset_page.values: %w", err)
 	}
 
 	for _, jws := range res {
@@ -518,8 +500,7 @@ func (c *Client) getZsetPage(key string, page uint) ([]jobScore, uint64, error) 
 	for i, jws := range jobsWithScores {
 		job, err := newJob([]byte(jws.JobBytes), nil, nil)
 		if err != nil {
-			logError("client.get_zset_page.new_job", err)
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("client.get_zset_page.new_job: %w", err)
 		}
 
 		jobsWithScores[i].job = job
@@ -527,8 +508,7 @@ func (c *Client) getZsetPage(key string, page uint) ([]jobScore, uint64, error) 
 
 	count, err := c.redisClient.ZCard(context.TODO(), key).Uint64()
 	if err != nil {
-		logError("client.get_zset_page.int64", err)
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("client.get_zset_page.int64: %w", err)
 	}
 
 	return jobsWithScores, count, nil

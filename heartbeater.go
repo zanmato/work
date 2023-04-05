@@ -2,6 +2,7 @@ package work
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -25,12 +26,13 @@ type workerPoolHeartbeater struct {
 	pid          int
 	hostname     string
 	workerIDs    string
+	logger       Logger
 
 	stopChan         chan struct{}
 	doneStoppingChan chan struct{}
 }
 
-func newWorkerPoolHeartbeater(namespace string, redisClient *redis.Client, workerPoolID string, jobTypes map[string]*jobType, concurrency uint, workerIDs []string) *workerPoolHeartbeater {
+func newWorkerPoolHeartbeater(namespace string, redisClient *redis.Client, workerPoolID string, jobTypes map[string]*jobType, concurrency uint, workerIDs []string, logger Logger) (*workerPoolHeartbeater, error) {
 	h := &workerPoolHeartbeater{
 		workerPoolID:     workerPoolID,
 		namespace:        namespace,
@@ -39,6 +41,7 @@ func newWorkerPoolHeartbeater(namespace string, redisClient *redis.Client, worke
 		concurrency:      concurrency,
 		stopChan:         make(chan struct{}),
 		doneStoppingChan: make(chan struct{}),
+		logger:           logger,
 	}
 
 	jobNames := make([]string, 0, len(jobTypes))
@@ -54,12 +57,11 @@ func newWorkerPoolHeartbeater(namespace string, redisClient *redis.Client, worke
 	h.pid = os.Getpid()
 	host, err := os.Hostname()
 	if err != nil {
-		logError("heartbeat.hostname", err)
-		host = "hostname_errored"
+		return nil, fmt.Errorf("could not get hostname: %w", err)
 	}
 	h.hostname = host
 
-	return h
+	return h, nil
 }
 
 func (h *workerPoolHeartbeater) start() {
@@ -105,7 +107,10 @@ func (h *workerPoolHeartbeater) heartbeat() {
 	)
 
 	if _, err := pl.Exec(context.TODO()); err != nil {
-		logError("heartbeat", err)
+		if h.logger != nil {
+			h.logger.Printf("heartbeat: %w", err)
+			return
+		}
 	}
 }
 
@@ -115,6 +120,9 @@ func (h *workerPoolHeartbeater) removeHeartbeat() {
 	pl.Del(context.TODO(), redisKeyHeartbeat(h.namespace, h.workerPoolID))
 
 	if _, err := pl.Exec(context.TODO()); err != nil {
-		logError("remove_heartbeat", err)
+		if h.logger != nil {
+			h.logger.Printf("heartbeat: %w", err)
+			return
+		}
 	}
 }

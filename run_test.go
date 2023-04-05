@@ -139,7 +139,9 @@ func TestRunHandlerPanic(t *testing.T) {
 
 	_, err := runJob(job, tstCtxType, middleware, jt)
 	assert.Error(t, err)
-	assert.Equal(t, "dayam", err.Error())
+
+	errString := err.Error()
+	assert.Equal(t, "recovery foo panic: dayam", errString[:25])
 }
 
 func TestRunMiddlewarePanic(t *testing.T) {
@@ -167,5 +169,7 @@ func TestRunMiddlewarePanic(t *testing.T) {
 
 	_, err := runJob(job, tstCtxType, middleware, jt)
 	assert.Error(t, err)
-	assert.Equal(t, "dayam", err.Error())
+
+	errString := err.Error()
+	assert.Equal(t, "recovery foo panic: dayam", errString[:25])
 }

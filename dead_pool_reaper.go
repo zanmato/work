@@ -23,12 +23,13 @@ type deadPoolReaper struct {
 	deadTime    time.Duration
 	reapPeriod  time.Duration
 	curJobTypes []string
+	logger      Logger
 
 	stopChan         chan struct{}
 	doneStoppingChan chan struct{}
 }
 
-func newDeadPoolReaper(namespace string, redisClient *redis.Client, curJobTypes []string) *deadPoolReaper {
+func newDeadPoolReaper(namespace string, redisClient *redis.Client, curJobTypes []string, logger Logger) *deadPoolReaper {
 	return &deadPoolReaper{
 		namespace:        namespace,
 		redisClient:      redisClient,
@@ -37,6 +38,7 @@ func newDeadPoolReaper(namespace string, redisClient *redis.Client, curJobTypes 
 		curJobTypes:      curJobTypes,
 		stopChan:         make(chan struct{}),
 		doneStoppingChan: make(chan struct{}),
+		logger:           logger,
 	}
 }
 
@@ -65,7 +67,9 @@ func (r *deadPoolReaper) loop() {
 
 			// Reap
 			if err := r.reap(); err != nil {
-				logError("dead_pool_reaper.reap", err)
+				if r.logger != nil {
+					r.logger.Printf("dead_pool_reaper.reap: %s", err)
+				}
 			}
 		}
 	}
@@ -85,7 +89,11 @@ func (r *deadPoolReaper) reap() error {
 		lockJobTypes := jobTypes
 		// if we found jobs from the heartbeat, requeue them and remove the heartbeat
 		if len(jobTypes) > 0 {
-			r.requeueInProgressJobs(deadPoolID, jobTypes)
+			if err := r.requeueInProgressJobs(deadPoolID, jobTypes); err != nil {
+				if r.logger != nil {
+					r.logger.Printf("dead_pool_reaper.requeueInProgressJobs: %s", err)
+				}
+			}
 			if err := r.redisClient.Del(context.TODO(), redisKeyHeartbeat(r.namespace, deadPoolID)).Err(); err != nil {
 				return err
 			}

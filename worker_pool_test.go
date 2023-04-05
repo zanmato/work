@@ -73,7 +73,9 @@ func TestWorkerPoolMiddlewareValidations(t *testing.T) {
 func TestWorkerPoolStartStop(t *testing.T) {
 	rcl := newTestClient(RedisTestPort)
 	ns := "work"
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: NewTestLogger(t),
+	})
 	wp.Start()
 	wp.Start()
 	wp.Stop()
@@ -85,7 +87,9 @@ func TestWorkerPoolStartStop(t *testing.T) {
 func TestWorkerPoolValidations(t *testing.T) {
 	rcl := newTestClient(RedisTestPort)
 	ns := "work"
-	wp, _ := NewWorkerPool(TestContext{}, 10, ns, rcl)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, ns, rcl, WorkerPoolOptions{
+		Logger: NewTestLogger(t),
+	})
 
 	if err := wp.Middleware(TestWorkerPoolValidations); err == nil {
 		t.Errorf("expected an error when using bad middleware")
@@ -101,7 +105,7 @@ func TestWorkersPoolRunSingleThreaded(t *testing.T) {
 	ns := "work"
 	job1 := "job1"
 	numJobs, concurrency, sleepTime := 5, 5, 2
-	wp := setupTestWorkerPool(rcl, ns, job1, concurrency, JobOptions{Priority: 1, MaxConcurrency: 1})
+	wp := setupTestWorkerPool(t, rcl, ns, job1, concurrency, JobOptions{Priority: 1, MaxConcurrency: 1})
 	wp.Start()
 	// enqueue some jobs
 	enqueuer, _ := NewEnqueuer(ns, rcl)
@@ -143,7 +147,7 @@ func TestWorkerPoolPauseSingleThreadedJobs(t *testing.T) {
 	rcl := newTestClient(RedisTestPort)
 	ns, job1 := "work", "job1"
 	numJobs, concurrency, sleepTime := 5, 5, 2
-	wp := setupTestWorkerPool(rcl, ns, job1, concurrency, JobOptions{Priority: 1, MaxConcurrency: 1})
+	wp := setupTestWorkerPool(t, rcl, ns, job1, concurrency, JobOptions{Priority: 1, MaxConcurrency: 1})
 	wp.Start()
 	// enqueue some jobs
 	enqueuer, _ := NewEnqueuer(ns, rcl)
@@ -195,13 +199,15 @@ func (t *TestContext) SleepyJob(job *Job) error {
 	return nil
 }
 
-func setupTestWorkerPool(redisClient *redis.Client, namespace, jobName string, concurrency int, jobOpts JobOptions) *WorkerPool {
+func setupTestWorkerPool(t *testing.T, redisClient *redis.Client, namespace, jobName string, concurrency int, jobOpts JobOptions) *WorkerPool {
 	deleteQueue(redisClient, namespace, jobName)
 	deleteRetryAndDead(redisClient, namespace)
-	deletePausedAndLockedKeys(namespace, jobName, redisClient)
+	assert.NoError(t, deletePausedAndLockedKeys(namespace, jobName, redisClient))
 
-	wp, _ := NewWorkerPool(TestContext{}, uint(concurrency), namespace, redisClient)
-	wp.JobWithOptions(jobName, jobOpts, (*TestContext).SleepyJob)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, uint(concurrency), namespace, redisClient, WorkerPoolOptions{
+		Logger: NewTestLogger(t),
+	})
+	assert.NoError(t, wp.JobWithOptions(jobName, jobOpts, (*TestContext).SleepyJob))
 	// reset the backoff times to help with testing
 	sleepBackoffsInMilliseconds = []int64{10, 10, 10, 10, 10}
 	return wp

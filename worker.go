@@ -21,6 +21,7 @@ type worker struct {
 	sleepBackoffs []int64
 	middleware    []*middlewareHandler
 	contextType   reflect.Type
+	logger        Logger
 
 	redisFetchScript *redis.Script
 	sampler          prioritySampler
@@ -33,9 +34,9 @@ type worker struct {
 	doneDrainingChan chan struct{}
 }
 
-func newWorker(namespace string, poolID string, redisClient *redis.Client, contextType reflect.Type, middleware []*middlewareHandler, jobTypes map[string]*jobType, sleepBackoffs []int64) *worker {
+func newWorker(namespace string, poolID string, redisClient *redis.Client, contextType reflect.Type, middleware []*middlewareHandler, jobTypes map[string]*jobType, sleepBackoffs []int64, logger Logger) *worker {
 	workerID := makeIdentifier()
-	ob := newObserver(namespace, redisClient, workerID)
+	ob := newObserver(namespace, redisClient, workerID, logger)
 
 	if len(sleepBackoffs) == 0 {
 		sleepBackoffs = sleepBackoffsInMilliseconds
@@ -48,6 +49,7 @@ func newWorker(namespace string, poolID string, redisClient *redis.Client, conte
 		redisClient:   redisClient,
 		contextType:   contextType,
 		sleepBackoffs: sleepBackoffs,
+		logger:        logger,
 
 		observer: ob,
 
@@ -120,7 +122,9 @@ func (w *worker) loop() {
 		case <-timer.C:
 			job, err := w.fetchJob()
 			if err != nil {
-				logError("worker.fetch", err)
+				if w.logger != nil {
+					w.logger.Printf("worker.fetch: %s", err)
+				}
 				timer.Reset(10 * time.Millisecond)
 			} else if job != nil {
 				w.processJob(job)
@@ -177,7 +181,13 @@ func (w *worker) fetchJob() (*Job, error) {
 
 func (w *worker) processJob(job *Job) {
 	if job.Unique {
-		updatedJob := w.getAndDeleteUniqueJob(job)
+		updatedJob, err := w.getAndDeleteUniqueJob(job)
+		if err != nil {
+			if w.logger != nil {
+				w.logger.Printf(err.Error())
+			}
+		}
+
 		// This is to support the old way of doing it, where we used the job off the queue and just deleted the unique key
 		// Going forward the job on the queue will always be just a placeholder, and we will be replacing it with the
 		// updated job extracted here
@@ -189,7 +199,6 @@ func (w *worker) processJob(job *Job) {
 	jt := w.jobTypes[job.Name]
 	if jt == nil {
 		runErr = fmt.Errorf("stray job: no handler")
-		logError("process_job.stray", runErr)
 	} else {
 		w.observeStarted(job.Name, job.ID, job.Args)
 		job.observer = w.observer // for Checkin
@@ -205,7 +214,7 @@ func (w *worker) processJob(job *Job) {
 	w.removeJobFromInProgress(job, fate)
 }
 
-func (w *worker) getAndDeleteUniqueJob(job *Job) *Job {
+func (w *worker) getAndDeleteUniqueJob(job *Job) (*Job, error) {
 	var uniqueKey string
 	var err error
 
@@ -214,36 +223,32 @@ func (w *worker) getAndDeleteUniqueJob(job *Job) *Job {
 	} else { // For jobs put in queue prior to this change. In the future this can be deleted as there will always be a UniqueKey
 		uniqueKey, err = redisKeyUniqueJob(w.namespace, job.Name, job.Args)
 		if err != nil {
-			logError("worker.delete_unique_job.key", err)
-			return nil
+			return nil, fmt.Errorf("worker.delete_unique_job.key: %w", err)
 		}
 	}
 
 	rawJSON, err := w.redisClient.Get(context.TODO(), uniqueKey).Bytes()
 	if err != nil {
-		logError("worker.delete_unique_job.get", err)
-		return nil
+		return nil, fmt.Errorf("worker.delete_unique_job.get: %w", err)
 	}
 
 	if err := w.redisClient.Del(context.TODO(), uniqueKey).Err(); err != nil {
-		logError("worker.delete_unique_job.del", err)
-		return nil
+		return nil, fmt.Errorf("worker.delete_unique_job.del: %w", err)
 	}
 
 	// Previous versions did not support updated arguments and just set key to 1, so in these cases we should do nothing.
 	// In the future this can be deleted, as we will always be getting arguments from here
 	if string(rawJSON) == "1" {
-		return nil
+		return nil, nil
 	}
 
 	// The job pulled off the queue was just a placeholder with no args, so replace it
 	jobWithArgs, err := newJob(rawJSON, job.dequeuedFrom, job.inProgQueue)
 	if err != nil {
-		logError("worker.delete_unique_job.updated_job", err)
-		return nil
+		return nil, fmt.Errorf("worker.delete_unique_job.updated_job: %w", err)
 	}
 
-	return jobWithArgs
+	return jobWithArgs, nil
 }
 
 func (w *worker) removeJobFromInProgress(job *Job, fate terminateOp) {
@@ -255,7 +260,9 @@ func (w *worker) removeJobFromInProgress(job *Job, fate terminateOp) {
 
 	fate(pl)
 	if _, err := pl.Exec(context.TODO()); err != nil {
-		logError("worker.remove_job_from_in_progress.lrem", err)
+		if w.logger != nil {
+			w.logger.Printf("worker.remove_job_from_in_progress.lrem: %s", err)
+		}
 	}
 }
 
@@ -265,7 +272,10 @@ func terminateOnly(_ redis.Pipeliner) {}
 func terminateAndRetry(w *worker, jt *jobType, job *Job) terminateOp {
 	rawJSON, err := job.serialize()
 	if err != nil {
-		logError("worker.terminate_and_retry.serialize", err)
+		if w.logger != nil {
+			w.logger.Printf("worker.terminate_and_retry.serialize: %s", err)
+		}
+
 		return terminateOnly
 	}
 
@@ -283,7 +293,9 @@ func terminateAndRetry(w *worker, jt *jobType, job *Job) terminateOp {
 func terminateAndDead(w *worker, job *Job) terminateOp {
 	rawJSON, err := job.serialize()
 	if err != nil {
-		logError("worker.terminate_and_dead.serialize", err)
+		if w.logger != nil {
+			w.logger.Printf("worker.terminate_and_dead.serialize: %s", err)
+		}
 		return terminateOnly
 	}
 	return func(pl redis.Pipeliner) {

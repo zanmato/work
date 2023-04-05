@@ -18,6 +18,7 @@ const (
 type periodicEnqueuer struct {
 	namespace        string
 	redisClient      *redis.Client
+	logger           Logger
 	periodicJobs     []*periodicJob
 	stopChan         chan struct{}
 	doneStoppingChan chan struct{}
@@ -29,11 +30,12 @@ type periodicJob struct {
 	schedule cron.Schedule
 }
 
-func newPeriodicEnqueuer(namespace string, redisClient *redis.Client, periodicJobs []*periodicJob) *periodicEnqueuer {
+func newPeriodicEnqueuer(namespace string, redisClient *redis.Client, periodicJobs []*periodicJob, logger Logger) *periodicEnqueuer {
 	return &periodicEnqueuer{
 		namespace:        namespace,
 		redisClient:      redisClient,
 		periodicJobs:     periodicJobs,
+		logger:           logger,
 		stopChan:         make(chan struct{}),
 		doneStoppingChan: make(chan struct{}),
 	}
@@ -56,7 +58,9 @@ func (pe *periodicEnqueuer) loop() {
 	if pe.shouldEnqueue() {
 		err := pe.enqueue()
 		if err != nil {
-			logError("periodic_enqueuer.loop.enqueue", err)
+			if pe.logger != nil {
+				pe.logger.Printf("periodic_enqueuer.loop.enqueue: %s", err)
+			}
 		}
 	}
 
@@ -70,7 +74,9 @@ func (pe *periodicEnqueuer) loop() {
 			if pe.shouldEnqueue() {
 				err := pe.enqueue()
 				if err != nil {
-					logError("periodic_enqueuer.loop.enqueue", err)
+					if pe.logger != nil {
+						pe.logger.Printf("periodic_enqueuer.loop.enqueue: %s", err)
+					}
 				}
 			}
 		}
@@ -134,7 +140,9 @@ func (pe *periodicEnqueuer) shouldEnqueue() bool {
 	if err == redis.Nil {
 		return true
 	} else if err != nil {
-		logError("periodic_enqueuer.should_enqueue", err)
+		if pe.logger != nil {
+			pe.logger.Printf("periodic_enqueuer.should_enqueue: %s", err)
+		}
 		return true
 	}
 

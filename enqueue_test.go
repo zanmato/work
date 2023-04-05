@@ -142,7 +142,9 @@ func TestEnqueueUnique(t *testing.T) {
 
 	// Process the queues. Ensure the right number of jobs were processed
 	var wats, taws int64
-	wp, _ := NewWorkerPool(TestContext{}, 3, ns, rcl)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 3, ns, rcl, WorkerPoolOptions{
+		Logger: NewTestLogger(t),
+	})
 
 	wp.JobWithOptions("wat", JobOptions{Priority: 1, MaxFails: 1}, func(job *Job) error {
 		mutex.Lock()
@@ -273,7 +275,9 @@ func TestEnqueueUniqueByKey(t *testing.T) {
 
 	// Process the queues. Ensure the right number of jobs were processed
 	var wats, taws int64
-	wp, _ := NewWorkerPool(TestContext{}, 3, ns, rcl)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 3, ns, rcl, WorkerPoolOptions{
+		Logger: NewTestLogger(t),
+	})
 	wp.JobWithOptions("wat", JobOptions{Priority: 1, MaxFails: 1}, func(job *Job) error {
 		mutex.Lock()
 		argA := job.Args["a"].(float64)

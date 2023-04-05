@@ -61,7 +61,7 @@ func TestWorkerBasics(t *testing.T) {
 	_, err = enqueuer.Enqueue(job3, Q{"a": 3})
 	assert.Nil(t, err)
 
-	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil)
+	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil, NewTestLogger(t))
 	w.start()
 	w.drain()
 	w.stop()
@@ -111,7 +111,7 @@ func TestWorkerInProgress(t *testing.T) {
 	_, err := enqueuer.Enqueue(job1, Q{"a": 1})
 	assert.Nil(t, err)
 
-	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil)
+	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil, NewTestLogger(t))
 	w.start()
 
 	// instead of w.forceIter(), we'll wait for 10 milliseconds to let the job start
@@ -162,7 +162,7 @@ func TestWorkerRetry(t *testing.T) {
 	enqueuer, _ := NewEnqueuer(ns, rcl)
 	_, err := enqueuer.Enqueue(job1, Q{"a": 1})
 	assert.Nil(t, err)
-	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil)
+	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil, NewTestLogger(t))
 	w.start()
 	w.drain()
 	w.stop()
@@ -214,7 +214,7 @@ func TestWorkerRetryWithCustomBackoff(t *testing.T) {
 	enqueuer, _ := NewEnqueuer(ns, rcl)
 	_, err := enqueuer.Enqueue(job1, Q{"a": 1})
 	assert.Nil(t, err)
-	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil)
+	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil, NewTestLogger(t))
 	w.start()
 	w.drain()
 	w.stop()
@@ -271,7 +271,7 @@ func TestWorkerDead(t *testing.T) {
 	assert.Nil(t, err)
 	_, err = enqueuer.Enqueue(job2, nil)
 	assert.Nil(t, err)
-	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil)
+	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil, NewTestLogger(t))
 	w.start()
 	w.drain()
 	w.stop()
@@ -324,7 +324,7 @@ func TestWorkersPaused(t *testing.T) {
 	_, err := enqueuer.Enqueue(job1, Q{"a": 1})
 	assert.NoError(t, err)
 
-	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil)
+	w := newWorker(ns, "1", rcl, tstCtxType, nil, jobTypes, nil, NewTestLogger(t))
 	// pause the jobs prior to starting
 	assert.NoError(t, pauseJobs(ns, job1, rcl))
 
@@ -372,7 +372,9 @@ func TestStop(t *testing.T) {
 		DialTimeout: 1 * time.Second,
 	})
 
-	wp, _ := NewWorkerPool(TestContext{}, 10, "work", rcl)
+	wp, _ := NewWorkerPoolWithOptions(TestContext{}, 10, "work", rcl, WorkerPoolOptions{
+		Logger: NewTestLogger(t),
+	})
 	wp.Start()
 	wp.Stop()
 }
@@ -538,33 +540,39 @@ func deletePausedAndLockedKeys(namespace, jobName string, redisClient *redis.Cli
 type emptyCtx struct{}
 
 // Starts up a pool with two workers emptying it as fast as they can
-// The pool is Stop()ped while jobs are still going on.  Tests that the
+// The pool is Stopped while jobs are still going on.  Tests that the
 // pool processing is really stopped and that it's not first completely
 // drained before returning.
-// https://github.com/zanmato/work/issues/24
+// https://github.com/gocraft/work/issues/24
 func TestWorkerPoolStop(t *testing.T) {
 	ns := "will_it_end"
 	rcl := newTestClient(RedisTestPort)
 	var started, stopped int32
 	num_iters := 30
 
-	wp, _ := NewWorkerPool(emptyCtx{}, 2, ns, rcl)
-
-	wp.Job("sample_job", func(c *emptyCtx, job *Job) error {
-		atomic.AddInt32(&started, 1)
-		time.Sleep(1 * time.Second)
-		atomic.AddInt32(&stopped, 1)
-		return nil
+	wp, _ := NewWorkerPoolWithOptions(emptyCtx{}, 2, ns, rcl, WorkerPoolOptions{
+		Logger: NewTestLogger(t),
 	})
+
+	assert.NoError(
+		t,
+		wp.Job("sample_job", func(c *emptyCtx, job *Job) error {
+			atomic.AddInt32(&started, 1)
+			time.Sleep(1 * time.Second)
+			atomic.AddInt32(&stopped, 1)
+			return nil
+		}),
+	)
 
 	enqueuer, _ := NewEnqueuer(ns, rcl)
 	for i := 0; i <= num_iters; i++ {
-		enqueuer.Enqueue("sample_job", Q{})
+		_, err := enqueuer.Enqueue("sample_job", Q{})
+		assert.NoError(t, err)
 	}
 
 	// Start the pool and quit before it has had a chance to complete
 	// all the jobs.
-	wp.Start()
+	assert.NoError(t, wp.Start())
 	time.Sleep(5 * time.Second)
 	wp.Stop()
 
