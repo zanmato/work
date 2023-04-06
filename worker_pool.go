@@ -191,8 +191,8 @@ func (wp *WorkerPool) JobWithOptions(name string, jobOpts JobOptions, fn interfa
 }
 
 // PeriodicallyEnqueue will periodically enqueue jobName according to the cron-based spec.
-// The spec format is based on https://godoc.org/github.com/robfig/cron, which is a relatively standard cron format.
-// Note that the first value is the seconds!
+// The spec format is based on https://pkg.go.dev/github.com/robfig/cron/v3, which is a relatively standard cron format.
+// Note that the first value is seconds, but is optional.
 // If you have multiple worker pools on different machines, they'll all coordinate and only enqueue your job once.
 func (wp *WorkerPool) PeriodicallyEnqueue(spec string, jobName string) (*WorkerPool, error) {
 	p := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
