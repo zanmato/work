@@ -106,20 +106,20 @@ func redisKeyLastPeriodicEnqueue(namespace string) string {
 // ARGV[1] = job queue's workerPoolID
 var redisLuaFetchJob = fmt.Sprintf(`
 local function acquireLock(lockKey, lockInfoKey, workerPoolID)
-  redis.call('incr', lockKey)
-  redis.call('hincrby', lockInfoKey, workerPoolID, 1)
+  redis.call('INCR', lockKey)
+  redis.call('HINCRBY', lockInfoKey, workerPoolID, 1)
 end
 
 local function haveJobs(jobQueue)
-  return redis.call('llen', jobQueue) > 0
+  return redis.call('LLEN', jobQueue) > 0
 end
 
 local function isPaused(pauseKey)
-  return redis.call('get', pauseKey)
+  return redis.call('GET', pauseKey)
 end
 
 local function canRun(lockKey, maxConcurrency)
-  local activeJobs = tonumber(redis.call('get', lockKey))
+  local activeJobs = tonumber(redis.call('GET', lockKey))
   if (not maxConcurrency or maxConcurrency == 0) or (not activeJobs or activeJobs < maxConcurrency) then
     -- default case: maxConcurrency not defined or set to 0 means no cap on concurrent jobs OR
     -- maxConcurrency set, but lock does not yet exist OR
@@ -143,11 +143,18 @@ for i=1,keylen,%d do
   lockInfoKey = KEYS[i+4]
   concurrencyKey = KEYS[i+5]
 
-  maxConcurrency = tonumber(redis.call('get', concurrencyKey))
+  maxConcurrency = tonumber(redis.call('GET', concurrencyKey))
 
   if haveJobs(jobQueue) and not isPaused(pauseKey) and canRun(lockKey, maxConcurrency) then
     acquireLock(lockKey, lockInfoKey, workerPoolID)
-    res = redis.call('rpoplpush', jobQueue, inProgQueue)
+
+    -- REDIS_VERSION_NUM was introduced in 7.0.0
+    if redis.REDIS_VERSION_NUM == nil then
+      res = redis.call('RPOPLPUSH', jobQueue, inProgQueue)
+    else
+      res = redis.call('LMOVE', jobQueue, inProgQueue, 'RIGHT', 'LEFT')
+    end
+
     return {res, jobQueue, inProgQueue}
   end
 end
@@ -165,8 +172,8 @@ return nil`, fetchKeysPerJobType)
 // ARGV[1] = workerPoolID for job queue
 var redisLuaReenqueueJob = fmt.Sprintf(`
 local function releaseLock(lockKey, lockInfoKey, workerPoolID)
-  redis.call('decr', lockKey)
-  redis.call('hincrby', lockInfoKey, workerPoolID, -1)
+  redis.call('DECR', lockKey)
+  redis.call('HINCRBY', lockInfoKey, workerPoolID, -1)
 end
 
 local keylen = #KEYS
@@ -178,7 +185,12 @@ for i=1,keylen,%d do
   jobQueue = KEYS[i+1]
   lockKey = KEYS[i+2]
   lockInfoKey = KEYS[i+3]
-  res = redis.call('rpoplpush', inProgQueue, jobQueue)
+  -- REDIS_VERSION_NUM was introduced in 7.0.0
+  if redis.REDIS_VERSION_NUM == nil then
+    res = redis.call('RPOPLPUSH', inProgQueue, jobQueue)
+  else
+    res = redis.call('LMOVE', inProgQueue, jobQueue, 'RIGHT', 'LEFT')
+  end
   if res then
     releaseLock(lockKey, lockInfoKey, workerPoolID)
     return {res, inProgQueue, jobQueue}
@@ -204,14 +216,14 @@ local deadPoolID = ARGV[1]
 for i=1,keylen,2 do
   lock = KEYS[i]
   lockInfo = KEYS[i+1]
-  deadLockCount = tonumber(redis.call('hget', lockInfo, deadPoolID))
+  deadLockCount = tonumber(redis.call('HGET', lockInfo, deadPoolID))
 
   if deadLockCount then
-    redis.call('decrby', lock, deadLockCount)
-    redis.call('hdel', lockInfo, deadPoolID)
+    redis.call('DECRBY', lock, deadLockCount)
+    redis.call('HDEL', lockInfo, deadPoolID)
 
-    if tonumber(redis.call('get', lock)) < 0 then
-      redis.call('set', lock, 0)
+    if tonumber(redis.call('GET', lock)) < 0 then
+      redis.call('SET', lock, 0)
     end
   end
 end
@@ -225,21 +237,26 @@ return nil
 // ARGV[2] = current time in epoch seconds
 var redisLuaZremLpushCmd = `
 local res, j, queue
-res = redis.call('zrangebyscore', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, 1)
+-- REDIS_VERSION_NUM was introduced in 7.0.0
+if redis.REDIS_VERSION_NUM == nil then
+  res = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, 1)
+else
+  res = redis.call('ZRANGE', KEYS[1], '-inf', ARGV[2],  'BYSCORE', 'LIMIT', 0, 1)
+end
 if #res > 0 then
   j = cjson.decode(res[1])
-  redis.call('zrem', KEYS[1], res[1])
+  redis.call('ZREM', KEYS[1], res[1])
   queue = ARGV[1] .. j['name']
   for _,v in pairs(KEYS) do
     if v == queue then
       j['t'] = tonumber(ARGV[2])
-      redis.call('lpush', queue, cjson.encode(j))
+      redis.call('LPUSH', queue, cjson.encode(j))
       return 'ok'
     end
   end
   j['err'] = 'unknown job when requeueing'
   j['failed_at'] = tonumber(ARGV[2])
-  redis.call('zadd', KEYS[2], ARGV[2], cjson.encode(j))
+  redis.call('ZADD', KEYS[2], ARGV[2], cjson.encode(j))
   return 'dead' -- put on dead queue
 end
 return nil
@@ -253,14 +270,19 @@ return nil
 // - job bytes (last job only)
 var redisLuaDeleteSingleCmd = `
 local jobs, i, j, deletedCount, jobBytes
-jobs = redis.call('zrangebyscore', KEYS[1], ARGV[1], ARGV[1])
+-- REDIS_VERSION_NUM was introduced in 7.0.0
+if redis.REDIS_VERSION_NUM == nil then
+  jobs = redis.call('ZRANGEBYSCORE', KEYS[1], ARGV[1], ARGV[1])
+else
+  jobs = redis.call('ZRANGE', KEYS[1], ARGV[1], ARGV[1], 'BYSCORE')
+end
 local jobCount = #jobs
 jobBytes = ''
 deletedCount = 0
 for i=1,jobCount do
   j = cjson.decode(jobs[i])
   if j['id'] == ARGV[2] then
-    redis.call('zrem', KEYS[1], jobs[i])
+    redis.call('ZREM', KEYS[1], jobs[i])
     deletedCount = deletedCount + 1
     jobBytes = jobs[i]
   end
@@ -277,13 +299,18 @@ return {deletedCount, jobBytes}
 // Returns: number of jobs requeued (typically 1 or 0)
 var redisLuaRequeueSingleDeadCmd = `
 local jobs, i, j, queue, found, requeuedCount
-jobs = redis.call('zrangebyscore', KEYS[1], ARGV[3], ARGV[3])
+-- REDIS_VERSION_NUM was introduced in 7.0.0
+if redis.REDIS_VERSION_NUM == nil then
+  jobs = redis.call('ZRANGEBYSCORE', KEYS[1], ARGV[3], ARGV[3])
+else 
+  jobs = redis.call('ZRANGE', KEYS[1], ARGV[3], ARGV[3], 'BYSCORE')
+end
 local jobCount = #jobs
 requeuedCount = 0
 for i=1,jobCount do
   j = cjson.decode(jobs[i])
   if j['id'] == ARGV[4] then
-    redis.call('zrem', KEYS[1], jobs[i])
+    redis.call('ZREM', KEYS[1], jobs[i])
     queue = ARGV[1] .. j['name']
     found = false
     for _,v in pairs(KEYS) do
@@ -292,7 +319,7 @@ for i=1,jobCount do
         j['fails'] = nil
         j['failed_at'] = nil
         j['err'] = nil
-        redis.call('lpush', queue, cjson.encode(j))
+        redis.call('LPUSH', queue, cjson.encode(j))
         requeuedCount = requeuedCount + 1
         found = true
         break
@@ -301,7 +328,7 @@ for i=1,jobCount do
     if not found then
       j['err'] = 'unknown job when requeueing'
       j['failed_at'] = tonumber(ARGV[2])
-      redis.call('zadd', KEYS[1], ARGV[2] + 5, cjson.encode(j))
+      redis.call('ZADD', KEYS[1], ARGV[2] + 5, cjson.encode(j))
     end
   end
 end
@@ -316,12 +343,17 @@ return requeuedCount
 // Returns: number of jobs requeued
 var redisLuaRequeueAllDeadCmd = `
 local jobs, i, j, queue, found, requeuedCount
-jobs = redis.call('zrangebyscore', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, ARGV[3])
+-- REDIS_VERSION_NUM was introduced in 7.0.0
+if redis.REDIS_VERSION_NUM == nil then
+  jobs = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, ARGV[3])
+else 
+  jobs = redis.call('ZRANGE', KEYS[1], '-inf', ARGV[2], 'BYSCORE', 'LIMIT', 0, ARGV[3])
+end
 local jobCount = #jobs
 requeuedCount = 0
 for i=1,jobCount do
   j = cjson.decode(jobs[i])
-  redis.call('zrem', KEYS[1], jobs[i])
+  redis.call('ZREM', KEYS[1], jobs[i])
   queue = ARGV[1] .. j['name']
   found = false
   for _,v in pairs(KEYS) do
@@ -330,7 +362,7 @@ for i=1,jobCount do
       j['fails'] = nil
       j['failed_at'] = nil
       j['err'] = nil
-      redis.call('lpush', queue, cjson.encode(j))
+      redis.call('LPUSH', queue, cjson.encode(j))
       requeuedCount = requeuedCount + 1
       found = true
       break
@@ -339,7 +371,7 @@ for i=1,jobCount do
   if not found then
     j['err'] = 'unknown job when requeueing'
     j['failed_at'] = tonumber(ARGV[2])
-    redis.call('zadd', KEYS[1], ARGV[2] + 5, cjson.encode(j))
+    redis.call('ZADD', KEYS[1], ARGV[2] + 5, cjson.encode(j))
   end
 end
 return requeuedCount
@@ -350,11 +382,11 @@ return requeuedCount
 // ARGV[1] = job
 // ARGV[2] = updated job or just a 1 if arguments don't update
 var redisLuaEnqueueUnique = `
-if redis.call('set', KEYS[2], ARGV[2], 'NX', 'EX', '86400') then
-  redis.call('lpush', KEYS[1], ARGV[1])
+if redis.call('SET', KEYS[2], ARGV[2], 'NX', 'EX', '86400') then
+  redis.call('LPUSH', KEYS[1], ARGV[1])
   return 'ok'
 else
-  redis.call('set', KEYS[2], ARGV[2], 'EX', '86400')
+  redis.call('SET', KEYS[2], ARGV[2], 'EX', '86400')
 end
 return 'dup'
 `
@@ -366,11 +398,11 @@ return 'dup'
 // ARGV[3] = epoch seconds for job to be run at
 // ARGV[4] = uniq key ttl
 var redisLuaEnqueueUniqueIn = `
-if redis.call('set', KEYS[2], ARGV[2], 'NX', 'EX', ARGV[4]) then
-  redis.call('zadd', KEYS[1], ARGV[3], ARGV[1])
+if redis.call('SET', KEYS[2], ARGV[2], 'NX', 'EX', ARGV[4]) then
+  redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
   return 'ok'
 else
-  redis.call('set', KEYS[2], ARGV[2], 'EX', ARGV[4])
+  redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[4])
 end
 return 'dup'
 `
