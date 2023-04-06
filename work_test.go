@@ -1,3 +1,3 @@
 package work
 
-var RedisTestPort = ":6400"
+var RedisTestPort = ":6379"

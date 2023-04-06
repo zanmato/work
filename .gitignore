@@ -1,5 +1,6 @@
 .DS_Store
 .idea
 .vscode
+cover.out
 go.work
 docker-compose.yml
