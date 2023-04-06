@@ -3,7 +3,7 @@ module github.com/zanmato/work/v2
 go 1.20
 
 require (
-	github.com/redis/go-redis/v9 v9.0.2
+	github.com/redis/go-redis/v9 v9.0.3
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.8.2
 )
