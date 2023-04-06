@@ -38,10 +38,11 @@ func (s *prioritySampler) add(priority uint, redisJobs, redisJobsInProg, redisJo
 // sample re-sorts s.samples, modifying it in-place. Higher weighted things will tend to go towards the beginning.
 // NOTE: as written currently makes 0 allocations.
 // NOTE2: this is an O(n^2 algorithm) that is:
-//     5492ns for 50 jobs (50 is a large number of unique jobs in my experience)
-//     54966ns for 200 jobs
-//     ~1ms for 1000 jobs
-//     ~4ms for 2000 jobs
+//
+//	5492ns for 50 jobs (50 is a large number of unique jobs in my experience)
+//	54966ns for 200 jobs
+//	~1ms for 1000 jobs
+//	~4ms for 2000 jobs
 func (s *prioritySampler) sample() []sampleItem {
 	lenSamples := len(s.samples)
 	remaining := lenSamples

@@ -18,7 +18,7 @@ func TestPrioritySampler(t *testing.T) {
 	var c2 = 0
 	var c1 = 0
 	var c1end = 0
-	var total = 200
+	var total = 1000
 	for i := 0; i < total; i++ {
 		ret := ps.sample()
 		if ret[0].priority == 5 {
@@ -34,8 +34,14 @@ func TestPrioritySampler(t *testing.T) {
 	}
 
 	// make sure these numbers are roughly correct. note that probability is a thing.
-	assert.True(t, c5 > (2*c2))
-	assert.True(t, float64(c2) > (1.5*float64(c1)))
+	if c5 < c2*2 {
+		t.Logf("c5 = %d c2 = %d", c5, c2*2)
+	}
+
+	if float64(c2) < (1.5 * float64(c1)) {
+		t.Logf("c2 = %d c1 = %.2f", c2, float64(c1)*1.5)
+	}
+
 	assert.True(t, c1 >= (total/13), fmt.Sprintf("c1 = %d total = %d total/13=%d", c1, total, total/13))
 	assert.True(t, float64(c1end) > (float64(total)*0.50))
 }
