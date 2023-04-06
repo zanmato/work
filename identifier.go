@@ -2,7 +2,7 @@ package work
 
 import (
 	"crypto/rand"
-	"fmt"
+	"encoding/hex"
 	"io"
 )
 
@@ -12,5 +12,5 @@ func makeIdentifier() string {
 	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("%x", b)
+	return hex.EncodeToString(b)
 }
